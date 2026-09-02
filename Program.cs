@@ -2135,7 +2135,7 @@ namespace OpennessLLM
                     continue;
                 }
 
-                rows.Add(RuntimeMapBlockRowFromCloneRecord(CreateCloneBlockRecordFromSourceFile(rootDir, file, string.Empty, "Loaded from clone file scan.")));
+                rows.Add(RuntimeMapBlockRowFromCloneRecord(CreateCloneBlockRecordFromSourceFile(rootDir, file, "Loaded from clone file scan.")));
                 knownPaths.Add(fullPath);
             }
 
@@ -20390,18 +20390,12 @@ namespace OpennessLLM
         {
             string manifestPath = Path.Combine(outDir, "plc-blocks.csv");
             List<CloneBlockRecord> records = new List<CloneBlockRecord>();
-            string defaultSoftwarePath = string.Empty;
             if (File.Exists(manifestPath))
             {
                 foreach (Dictionary<string, string> row in ReadCsv(manifestPath))
                 {
                     string groupPath = RowGroupPathKey(row, "GroupPath");
                     string filePath = GetCsvValue(row, "FilePath");
-                    if (string.IsNullOrEmpty(defaultSoftwarePath))
-                    {
-                        defaultSoftwarePath = GetCsvValue(row, "SoftwarePath");
-                    }
-
                     string fileName = Path.GetFileName(filePath);
                     string language = GetCsvValue(row, "ProgrammingLanguage");
                     string blockType = GetCsvValue(row, "BlockType");
@@ -20503,13 +20497,13 @@ namespace OpennessLLM
                     continue;
                 }
 
-                records.Add(CreateCloneBlockRecordFromSourceFile(rootDir, file, defaultSoftwarePath, "Loaded from clone file scan."));
+                records.Add(CreateCloneBlockRecordFromSourceFile(rootDir, file, "Loaded from clone file scan."));
             }
 
             return records;
         }
 
-        private static CloneBlockRecord CreateCloneBlockRecordFromSourceFile(string rootDir, string file, string softwarePath, string message)
+        private static CloneBlockRecord CreateCloneBlockRecordFromSourceFile(string rootDir, string file, string message)
         {
             Dictionary<string, string> sidecar = LoadSidecarMetadata(file);
             bool hasSidecar = sidecar.Count > 0;
@@ -20553,9 +20547,14 @@ namespace OpennessLLM
             string sidecarName = SidecarValue(sidecar, "name");
             string sidecarSoftwarePath = SidecarValue(sidecar, "softwarePath");
             string sourceOrigin = SidecarValue(sidecar, "sourceOrigin");
+            bool explicitNewLocalSource = EqualsIgnoreCase(sourceOrigin, "explicit-new-local-source")
+                && !string.IsNullOrWhiteSpace(sidecarSoftwarePath);
             return new CloneBlockRecord
             {
-                SoftwarePath = FirstNonEmpty(sidecarSoftwarePath, softwarePath),
+                // A first-manifest-path fallback is not proof of ownership in a
+                // multi-PLC clone. Loose sources stay unscoped unless the
+                // sidecar names their software explicitly.
+                SoftwarePath = sidecarSoftwarePath,
                 GroupPath = groupPath,
                 GroupPathDisplay = GroupPathDisplay(groupPath),
                 Name = FirstNonEmpty(nameFromSource, sidecarName, nameFromFile),
@@ -20575,7 +20574,7 @@ namespace OpennessLLM
                 CurrentPath = string.Empty,
                 ExportStatus = "ok",
                 ExportMessage = message,
-                Provenance = EqualsIgnoreCase(sourceOrigin, "explicit-new-local-source")
+                Provenance = explicitNewLocalSource
                     ? "explicit-new-local-source"
                     : "unknown-orphaned"
             };
@@ -20621,32 +20620,97 @@ namespace OpennessLLM
                 return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
 
-            string text = File.ReadAllText(path, Encoding.UTF8);
+            try
+            {
+                return ParseStrictFlatJsonObject(File.ReadAllText(path, Encoding.UTF8), path);
+            }
+            catch (InvalidDataException)
+            {
+                // A malformed or nested sidecar must never grant a safety
+                // exemption. Treat it as absent/unknown; downstream preflight
+                // remains conservative.
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private static Dictionary<string, string> ParseStrictFlatJsonObject(string text, string context)
+        {
+            string trimmed = EmptyIfNull(text).Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal) || !trimmed.EndsWith("}", StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(context + " is not a complete JSON object.");
+            }
+
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            Regex property = new Regex("\"(?<key>(?:\\\\.|[^\"\\\\])*)\"\\s*:\\s*(?:\"(?<str>(?:\\\\.|[^\"\\\\])*)\"|(?<raw>true|false|null|-?\\d+(?:\\.\\d+)?))", RegexOptions.IgnoreCase);
-            foreach (Match match in property.Matches(text))
+            int index = 1;
+            while (true)
             {
-                string key = JsonUnescape(match.Groups["key"].Value);
-                string value = match.Groups["str"].Success
-                    ? JsonUnescape(match.Groups["str"].Value)
-                    : match.Groups["raw"].Value;
-                if (EqualsIgnoreCase(value, "null"))
+                SkipJsonWhitespace(trimmed, ref index);
+                if (index == trimmed.Length - 1)
                 {
-                    value = string.Empty;
+                    return result;
                 }
 
-                if (!string.IsNullOrWhiteSpace(key))
+                string key = ReadJsonStringLiteral(trimmed, ref index, context + " key");
+                if (string.IsNullOrWhiteSpace(key) || result.ContainsKey(key))
                 {
-                    result[key] = value;
+                    throw new InvalidDataException(context + " contains an empty or duplicate property name.");
+                }
+
+                SkipJsonWhitespace(trimmed, ref index);
+                if (index >= trimmed.Length || trimmed[index] != ':')
+                {
+                    throw new InvalidDataException(context + " has a property without ':'.");
+                }
+
+                index++;
+                SkipJsonWhitespace(trimmed, ref index);
+                string value;
+                if (index < trimmed.Length && trimmed[index] == '"')
+                {
+                    value = ReadJsonStringLiteral(trimmed, ref index, context + " value");
+                }
+                else
+                {
+                    int start = index;
+                    while (index < trimmed.Length && trimmed[index] != ',' && trimmed[index] != '}')
+                    {
+                        if (trimmed[index] == '{' || trimmed[index] == '[' || trimmed[index] == ']')
+                        {
+                            throw new InvalidDataException(context + " must be a flat JSON object with primitive values.");
+                        }
+
+                        index++;
+                    }
+
+                    string raw = trimmed.Substring(start, index - start).Trim();
+                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)$", RegexOptions.IgnoreCase))
+                    {
+                        throw new InvalidDataException(context + " contains a non-primitive or malformed value.");
+                    }
+
+                    value = EqualsIgnoreCase(raw, "null") ? string.Empty : raw;
+                }
+
+                result[key] = value;
+                SkipJsonWhitespace(trimmed, ref index);
+                if (index == trimmed.Length - 1 && trimmed[index] == '}')
+                {
+                    return result;
+                }
+
+                if (index >= trimmed.Length || trimmed[index] != ',')
+                {
+                    throw new InvalidDataException(context + " has invalid JSON object syntax.");
+                }
+
+                index++;
+                SkipJsonWhitespace(trimmed, ref index);
+                if (index >= trimmed.Length - 1)
+                {
+                    throw new InvalidDataException(context + " has a trailing comma or incomplete property.");
                 }
             }
-
-            if (result.Count == 0 && !string.IsNullOrWhiteSpace(text.Trim().Trim('{', '}')))
-            {
-                throw new InvalidDataException("Sidecar metadata is not a flat JSON object: " + path);
-            }
-
-            return result;
         }
 
         private static string SidecarValue(Dictionary<string, string> sidecar, string key)
@@ -22881,6 +22945,12 @@ namespace OpennessLLM
             AssertTrue(missingTracked.Count == 1, "a manifest-tracked row must remain represented when its _root source is missing");
             AssertEqual("tracked-baseline", missingTracked[0].Provenance, "missing tracked source must retain tracked-baseline provenance");
             AssertTrue(!File.Exists(missingTracked[0].ClonePath), "tracked-source regression fixture must actually be missing");
+            string unscopedLoosePath = Path.Combine(trackedRootDir, "30_Unscoped_New.scl");
+            WriteTextFile(unscopedLoosePath, "FUNCTION \"Unscoped_New\" : Void\nEND_FUNCTION\n");
+            List<CloneBlockRecord> mixedSoftwareRecords = LoadCloneBlockManifest(trackedCloneDir, trackedRootDir);
+            CloneBlockRecord unscopedLoose = mixedSoftwareRecords.First(x => EqualsIgnoreCase(x.ClonePath, unscopedLoosePath));
+            AssertEqual("unknown-orphaned", unscopedLoose.Provenance, "loose source without sidecar scope must remain unknown/orphaned");
+            AssertEqual(string.Empty, unscopedLoose.SoftwarePath, "loose source must not inherit the first SoftwarePath from the manifest");
 
             string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
             string rootDir = Path.Combine(cloneDir, "_root");
@@ -22890,6 +22960,7 @@ namespace OpennessLLM
             List<CloneBlockRecord> unknown = LoadCloneBlockManifest(cloneDir, rootDir);
             AssertTrue(unknown.Count == 1, "loose clone source should be discovered");
             AssertEqual("unknown-orphaned", unknown[0].Provenance, "a loose source without exact origin sidecar must fail closed as unknown/orphaned");
+            AssertEqual(string.Empty, unknown[0].SoftwarePath, "unscoped loose source must overlap all software paths conservatively");
 
             List<Dictionary<string, string>> orphanedIdentityChange = new List<Dictionary<string, string>>
             {
@@ -22897,6 +22968,17 @@ namespace OpennessLLM
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "Widget_Renamed", string.Empty, "PLC"),
             };
             AssertTrue(SourceBlockerGateThrows("apply-clone", orphanedIdentityChange), "unknown/orphaned source plus renamed+renumbered visual block in the same software/number space must fail closed");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "malformed sidecar must not grant explicit-new provenance");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"metadata\":{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "nested sidecar origin must not grant a flat metadata exemption");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"}\n");
+            CloneBlockRecord originWithoutScope = LoadCloneBlockManifest(cloneDir, rootDir)[0];
+            AssertEqual("unknown-orphaned", originWithoutScope.Provenance, "explicit origin without softwarePath must remain unknown/orphaned");
+            AssertEqual(string.Empty, originWithoutScope.SoftwarePath, "origin without softwarePath must remain unscoped");
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}\n");
             List<CloneBlockRecord> explicitNew = LoadCloneBlockManifest(cloneDir, rootDir);

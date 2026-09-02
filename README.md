@@ -241,7 +241,8 @@ A source discovered outside `plc-blocks.csv` has fail-closed
 `unknown-orphaned` provenance. To assert that it is intentionally new local
 input, set `"sourceOrigin":"explicit-new-local-source"` in its sidecar; this is
 the only loose-source origin that receives the new-block exemption from the
-ambiguous visual-block gate. Use `softwarePath` to scope it when needed.
+ambiguous visual-block gate. A nonempty `softwarePath` in the same valid flat
+JSON sidecar is required; malformed/nested metadata remains `unknown-orphaned`.
 
 When the project is already open in TIA Portal, use `--attach`:
 

@@ -561,7 +561,9 @@ sourceOrigin
 Для source, которого нет в `plc-blocks.csv`, безопасное происхождение по
 умолчанию — `unknown-orphaned`. Только точное sidecar-значение
 `sourceOrigin=explicit-new-local-source` подтверждает намеренно добавленный
-новый локальный source; потеря или неполнота manifest не даёт этого исключения.
+новый локальный source, причём в том же валидном flat JSON обязателен непустой
+`softwarePath`. Malformed/nested sidecar, потеря или неполнота manifest не дают
+этого исключения; loose source также не наследует первый software path из manifest.
 
 Если sidecar отсутствует, numeric prefix filename может означать manual block
 number.

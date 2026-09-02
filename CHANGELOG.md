@@ -32,7 +32,11 @@ All notable changes to OpennessLLM are recorded in this file.
   Manifest rows also retain `tracked-baseline` provenance when their `_root`
   source file is missing, so deleting the source cannot erase tracking history.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
-  software scope fails closed where identities could overlap.
+  software scope fails closed where identities could overlap. Loose sources do
+  not inherit the first manifest software path, and explicit-new provenance
+  requires a nonempty sidecar `softwarePath`.
+- Safety-critical origin metadata is accepted only from a complete, valid flat
+  JSON sidecar. Malformed or nested sidecars remain `unknown-orphaned`.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
   reports without the column fail closed), after bundle integrity validation.
