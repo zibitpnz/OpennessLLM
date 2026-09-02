@@ -6382,6 +6382,8 @@ namespace OpennessLLM
                 || EqualsIgnoreCase(name, "_compare")
                 || EqualsIgnoreCase(name, "_preflight")
                 || EqualsIgnoreCase(name, "_check-publish")
+                || EqualsIgnoreCase(name, "_manifest-publish")
+                || EqualsIgnoreCase(name, "_sync-staging")
                 || EqualsIgnoreCase(name, "_sync-backups")
                 || EqualsIgnoreCase(name, "_hmi")
                 || EqualsIgnoreCase(name, "_hmi_metadata")
@@ -13432,13 +13434,6 @@ namespace OpennessLLM
 
         private static void InitializeProjectClone(InventorySnapshot snapshot, string outDir, Options options)
         {
-            Directory.CreateDirectory(outDir);
-            InvalidateCloneCheckBundle(outDir);
-            string rootDir = Path.Combine(outDir, "_root");
-
-            CloneBlockFolderStructure(snapshot, outDir);
-            WriteCloneSummary(snapshot, outDir, options.Force);
-
             DeviceRecord softwareRecord = RequireSinglePlcSoftware(snapshot, "init-clone");
             object software = softwareRecord.Object;
             object externalSourceGroup = TryGetPropertyValue(software, "ExternalSourceGroup");
@@ -13449,6 +13444,15 @@ namespace OpennessLLM
 
             Type generateSourceType = FindType("Siemens.Engineering.SW.ExternalSources.IGenerateSource");
             MethodInfo generateSource = FindGenerateSourceMethod(externalSourceGroup);
+
+            // All target selection and capability checks must finish before an
+            // existing clone workspace or authorization marker is touched.
+            Directory.CreateDirectory(outDir);
+            InvalidateCloneCheckBundle(outDir);
+            string rootDir = Path.Combine(outDir, "_root");
+
+            CloneBlockFolderStructure(snapshot, outDir);
+            WriteCloneSummary(snapshot, outDir, options.Force);
 
             List<string[]> report = new List<string[]>();
             int exported = 0;
@@ -13515,22 +13519,19 @@ namespace OpennessLLM
 
         private static void CheckProjectClone(InventorySnapshot snapshot, string outDir)
         {
+            CheckProjectClone(snapshot, outDir, new List<ExplicitNewPromotionReceipt>());
+        }
+
+        private static void CheckProjectClone(
+            InventorySnapshot snapshot,
+            string outDir,
+            List<ExplicitNewPromotionReceipt> promotionReceipts)
+        {
             string rootDir = Path.Combine(outDir, "_root");
             if (!Directory.Exists(rootDir))
             {
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
             }
-
-            // A completed marker is the commit record for the report bundle.
-            // Invalidate it before starting so an interrupted check can never
-            // authorize writes with evidence from an older run.
-            string bundleMarkerPath = Path.Combine(outDir, CloneCheckBundleFileName);
-            InvalidateCloneCheckBundle(outDir);
-
-            string checkRunId = Guid.NewGuid().ToString("N");
-            string compareDir = Path.Combine(outDir, "_compare", "current-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + checkRunId.Substring(0, 8));
-            string compareRootDir = Path.Combine(compareDir, "_root");
-            Directory.CreateDirectory(compareRootDir);
 
             DeviceRecord softwareRecord = RequireSinglePlcSoftware(snapshot, "check-clone");
             CloneCheckTargetIdentity targetIdentity = CloneCheckTargetFromSnapshot(snapshot);
@@ -13543,6 +13544,19 @@ namespace OpennessLLM
 
             Type generateSourceType = FindType("Siemens.Engineering.SW.ExternalSources.IGenerateSource");
             MethodInfo generateSource = FindGenerateSourceMethod(externalSourceGroup);
+
+            RecoverPendingProvenancePromotions(outDir, rootDir);
+
+            // A completed marker is the commit record for the report bundle.
+            // Invalidate it before starting so an interrupted check can never
+            // authorize writes with evidence from an older run.
+            string bundleMarkerPath = Path.Combine(outDir, CloneCheckBundleFileName);
+            InvalidateCloneCheckBundle(outDir);
+
+            string checkRunId = Guid.NewGuid().ToString("N");
+            string compareDir = Path.Combine(outDir, "_compare", "current-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + checkRunId.Substring(0, 8));
+            string compareRootDir = Path.Combine(compareDir, "_root");
+            Directory.CreateDirectory(compareRootDir);
 
             List<CloneBlockRecord> currentBlocks = new List<CloneBlockRecord>();
             foreach (BlockRecord block in snapshot.Blocks.OrderBy(x => EmptyIfNull(x.GroupPath)).ThenBy(x => SafeInt(x.Number)).ThenBy(x => x.Name))
@@ -13584,7 +13598,7 @@ namespace OpennessLLM
             }
 
             List<CloneBlockRecord> cloneBlocks = LoadCloneBlockManifest(outDir, rootDir);
-            if (PromoteMatchedExplicitNewSources(snapshot, outDir, rootDir, cloneBlocks) > 0)
+            if (PromoteMatchedExplicitNewSources(outDir, rootDir, cloneBlocks, currentBlocks, promotionReceipts) > 0)
             {
                 cloneBlocks = LoadCloneBlockManifest(outDir, rootDir);
             }
@@ -13872,7 +13886,7 @@ namespace OpennessLLM
             diffs.Add(CloneDiff(
                 "added",
                 current,
-                null,
+                clone,
                 "The tracked clone source file is missing. The exportable current block is treated as deleted from clone."));
             return true;
         }
@@ -15065,15 +15079,17 @@ namespace OpennessLLM
                 throw new DirectoryNotFoundException("Latest compare root was not found: " + compareRootDir);
             }
 
-            string syncStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-            string backupDir = Path.Combine(outDir, "_sync-backups", "sync-" + syncStamp);
+            string syncStamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+            string backupDir = UniquePath(Path.Combine(outDir, "_sync-backups", "sync-" + syncStamp));
+            string stagingRootParent = Path.Combine(outDir, "_sync-staging");
+            string stagingDir = Path.Combine(stagingRootParent, "run-" + Guid.NewGuid().ToString("N"));
+            string stagingRoot = Path.Combine(stagingDir, "_root");
             string reportPath = Path.Combine(outDir, "sync-clone-report.csv");
             List<string[]> report = new List<string[]>();
             List<Dictionary<string, string>> blockRows = bundle.BlockRows;
             List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
             EnsureNoSourceBlockersForWrite("sync-clone", blockRows, sourceBlockerRows);
             EnsureCloneCheckCurrentSourcesUnchanged(blockRows);
-            InvalidateCloneCheckBundle(outDir);
 
             int updated = 0;
             int added = 0;
@@ -15082,97 +15098,119 @@ namespace OpennessLLM
             int skipped = 0;
             int errors = 0;
 
-            foreach (Dictionary<string, string> row in blockRows)
+            try
             {
-                string status = GetCsvValue(row, "Status");
-                string name = GetCsvValue(row, "Name");
-                string clonePath = GetCsvValue(row, "ClonePath");
-                string currentPath = GetCsvValue(row, "CurrentPath");
-                string destinationPath = DetermineSyncDestinationPath(status, clonePath, currentPath, compareRootDir, rootDir);
+                CopyDirectory(rootDir, stagingRoot, false);
+            }
+            catch (Exception ex)
+            {
+                errors++;
+                report.Add(SyncReportRow("stage-root", "_root", rootDir, string.Empty, stagingRoot, "error", ex.GetType().Name + ": " + ex.Message));
+            }
 
+            if (errors == 0)
+            {
+                foreach (Dictionary<string, string> row in blockRows)
+                {
+                    string status = GetCsvValue(row, "Status");
+                    string name = GetCsvValue(row, "Name");
+                    string clonePath = GetCsvValue(row, "ClonePath");
+                    string currentPath = GetCsvValue(row, "CurrentPath");
+                    string destinationPath = DetermineSyncDestinationPath(status, clonePath, currentPath, compareRootDir, rootDir);
+                    string stagedClonePath = string.IsNullOrWhiteSpace(clonePath) ? string.Empty : MapClonePathToAlternateRoot(clonePath, rootDir, stagingRoot);
+                    string stagedDestinationPath = string.IsNullOrWhiteSpace(destinationPath) ? string.Empty : MapClonePathToAlternateRoot(destinationPath, rootDir, stagingRoot);
+
+                    try
+                    {
+                        if (EqualsIgnoreCase(status, "unchanged"))
+                        {
+                            skipped++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Already in sync."));
+                        }
+                        else if (EqualsIgnoreCase(status, "changed"))
+                        {
+                            CopyFileIntoStagedClone(currentPath, stagedDestinationPath, stagingRoot);
+                            updated++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Staged updated clone file from latest compare snapshot."));
+                        }
+                        else if (EqualsIgnoreCase(status, "added"))
+                        {
+                            CopyFileIntoStagedClone(currentPath, stagedDestinationPath, stagingRoot);
+                            added++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Staged added clone file from latest compare snapshot."));
+                        }
+                        else if (EqualsIgnoreCase(status, "removed"))
+                        {
+                            RemoveStagedClonePath(stagedClonePath, stagingRoot);
+                            removed++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Staged clone file removal; original remains recoverable in the transaction backup."));
+                        }
+                        else if (EqualsIgnoreCase(status, "moved-or-renamed") || EqualsIgnoreCase(status, "moved-or-renamed-and-changed"))
+                        {
+                            if (!EqualsIgnoreCase(Path.GetFullPath(stagedClonePath), Path.GetFullPath(stagedDestinationPath)))
+                            {
+                                RemoveStagedClonePath(stagedClonePath, stagingRoot);
+                            }
+
+                            CopyFileIntoStagedClone(currentPath, stagedDestinationPath, stagingRoot);
+                            moved++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Staged moved/renamed clone file from latest compare snapshot."));
+                        }
+                        else if (EqualsIgnoreCase(status, "export-error"))
+                        {
+                            skipped++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Skipped because the latest compare export failed."));
+                        }
+                        else if (IsSourceBlockedStatus(status))
+                        {
+                            skipped++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Skipped because this block is source-blocked."));
+                        }
+                        else
+                        {
+                            skipped++;
+                            report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Unknown check status."));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        errors++;
+                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "error", ex.GetType().Name + ": " + ex.Message));
+                    }
+                }
+            }
+
+            if (errors == 0)
+            {
+                errors += SyncCloneGroupsStaged(bundle.GroupRows, rootDir, stagingRoot, report);
+            }
+
+            string stagedBlockManifest = Path.Combine(stagingDir, "plc-blocks.csv");
+            string stagedGroupManifest = Path.Combine(stagingDir, "block-groups.csv");
+            if (errors == 0)
+            {
                 try
                 {
-                    if (EqualsIgnoreCase(status, "unchanged"))
-                    {
-                        skipped++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Already in sync."));
-                    }
-                    else if (EqualsIgnoreCase(status, "changed"))
-                    {
-                        CopyFileIntoClone(currentPath, destinationPath, backupDir, rootDir);
-                        updated++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Updated clone file from latest compare snapshot."));
-                    }
-                    else if (EqualsIgnoreCase(status, "added"))
-                    {
-                        CopyFileIntoClone(currentPath, destinationPath, backupDir, rootDir);
-                        added++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Added clone file from latest compare snapshot."));
-                    }
-                    else if (EqualsIgnoreCase(status, "removed"))
-                    {
-                        ArchiveExistingPath(clonePath, backupDir, rootDir);
-                        removed++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Removed clone file by moving it to sync backup."));
-                    }
-                    else if (EqualsIgnoreCase(status, "moved-or-renamed") || EqualsIgnoreCase(status, "moved-or-renamed-and-changed"))
-                    {
-                        if (!EqualsIgnoreCase(Path.GetFullPath(clonePath), Path.GetFullPath(destinationPath)))
-                        {
-                            ArchiveExistingPath(clonePath, backupDir, rootDir);
-                        }
-
-                        CopyFileIntoClone(currentPath, destinationPath, backupDir, rootDir);
-                        moved++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "ok", "Moved/renamed clone file to match latest compare snapshot."));
-                    }
-                    else if (EqualsIgnoreCase(status, "export-error"))
-                    {
-                        skipped++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Skipped because the latest compare export failed."));
-                    }
-                    else if (IsSourceBlockedStatus(status))
-                    {
-                        skipped++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Skipped because this block is source-blocked."));
-                    }
-                    else
-                    {
-                        skipped++;
-                        report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "skipped", "Unknown check status."));
-                    }
+                    WriteSyncedBlockManifest(stagedBlockManifest, Path.Combine(outDir, "plc-blocks.csv"), rootDir, stagingRoot, compareRootDir, blockRows);
+                    WriteSyncedGroupManifest(stagedGroupManifest, Path.Combine(outDir, "block-groups.csv"), rootDir, bundle.GroupRows);
+                    WriteCloneMetadata(stagingDir, outDir, stagedBlockManifest, stagedGroupManifest);
                 }
                 catch (Exception ex)
                 {
                     errors++;
-                    report.Add(SyncReportRow(status, name, clonePath, currentPath, destinationPath, "error", ex.GetType().Name + ": " + ex.Message));
+                    report.Add(SyncReportRow("stage-manifests", "MANIFESTS", string.Empty, string.Empty, stagingDir, "error", ex.GetType().Name + ": " + ex.Message));
                 }
             }
 
-            SyncCloneGroups(bundle.GroupRows, rootDir, backupDir, report);
-            WriteSyncedBlockManifest(outDir, rootDir, compareRootDir, blockRows);
-            WriteSyncedGroupManifest(outDir, rootDir, bundle.GroupRows);
-            WriteCloneMetadata(outDir);
-
-            WriteCsv(reportPath,
-                new[] { "CheckStatus", "Name", "ClonePath", "CurrentPath", "DestinationPath", "SyncStatus", "Message" },
-                report);
-
-            string summaryPath = Path.Combine(outDir, "sync-clone-summary.txt");
-            using (StreamWriter writer = NewUtf8Writer(summaryPath))
+            if (errors > 0)
             {
-                writer.WriteLine("Project clone synced at: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                writer.WriteLine("Clone directory: " + outDir);
-                writer.WriteLine("Latest compare snapshot: " + compareDir);
-                writer.WriteLine("Backup directory: " + backupDir);
-                writer.WriteLine();
-                writer.WriteLine("Updated files: " + updated);
-                writer.WriteLine("Added files: " + added);
-                writer.WriteLine("Removed files: " + removed);
-                writer.WriteLine("Moved/renamed files: " + moved);
-                writer.WriteLine("Skipped files: " + skipped);
-                writer.WriteLine("Errors: " + errors);
+                WriteSyncCloneReports(outDir, compareDir, backupDir, report, updated, added, removed, moved, skipped, errors, false);
+                TryDeleteSyncStaging(stagingDir, stagingRootParent);
+                throw new InvalidOperationException("sync-clone failed with " + errors.ToString(CultureInfo.InvariantCulture) + " error(s); the original _root, manifests, metadata, and authorization bundle were left unchanged.");
             }
+
+            CommitStagedSyncWorkspace(outDir, stagingDir, backupDir);
+            WriteSyncCloneReports(outDir, compareDir, backupDir, report, updated, added, removed, moved, skipped, errors, true);
 
             Console.WriteLine("Clone sync completed.");
             Console.WriteLine("Clone directory: " + outDir);
@@ -15185,12 +15223,243 @@ namespace OpennessLLM
             Console.WriteLine("Skipped files: " + skipped);
             Console.WriteLine("Errors: " + errors);
             Console.WriteLine("Sync report written to: " + reportPath);
-            Console.WriteLine("Summary written to: " + summaryPath);
+            Console.WriteLine("Summary written to: " + Path.Combine(outDir, "sync-clone-summary.txt"));
         }
 
         private static string[] SyncReportRow(string checkStatus, string name, string clonePath, string currentPath, string destinationPath, string syncStatus, string message)
         {
             return new[] { checkStatus, name, clonePath, currentPath, destinationPath, syncStatus, message };
+        }
+
+        private static void CopyFileIntoStagedClone(string sourcePath, string destinationPath, string stagingRoot)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+            {
+                throw new FileNotFoundException("Current compare file was not found.", sourcePath);
+            }
+
+            if (string.IsNullOrWhiteSpace(destinationPath))
+            {
+                throw new InvalidOperationException("Staged destination path is empty.");
+            }
+
+            EnsurePathInside(destinationPath, stagingRoot);
+            if (Directory.Exists(destinationPath))
+            {
+                throw new IOException("Staged destination is an existing directory: " + destinationPath);
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath));
+            File.Copy(sourcePath, destinationPath, true);
+        }
+
+        private static void RemoveStagedClonePath(string path, string stagingRoot)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            EnsurePathInside(path, stagingRoot);
+            string fullRoot = Path.GetFullPath(stagingRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (EqualsIgnoreCase(fullPath, fullRoot))
+            {
+                throw new InvalidOperationException("Refusing to remove the staged clone root itself.");
+            }
+
+            if (File.Exists(fullPath))
+            {
+                File.Delete(fullPath);
+            }
+            else if (Directory.Exists(fullPath))
+            {
+                Directory.Delete(fullPath, true);
+            }
+        }
+
+        private static int SyncCloneGroupsStaged(List<Dictionary<string, string>> groupRows, string rootDir, string stagingRoot, List<string[]> report)
+        {
+            int errors = 0;
+            foreach (Dictionary<string, string> row in groupRows ?? new List<Dictionary<string, string>>())
+            {
+                string status = GetCsvValue(row, "Status");
+                string groupPath = RowGroupPathKey(row, "GroupPath");
+                string directory = GetCsvValue(row, "CloneDirectory");
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    directory = CloneDirectoryForBlockGroup(rootDir, groupPath);
+                }
+
+                string stagedDirectory = MapClonePathToAlternateRoot(directory, rootDir, stagingRoot);
+                try
+                {
+                    if (EqualsIgnoreCase(status, "added"))
+                    {
+                        Directory.CreateDirectory(stagedDirectory);
+                        report.Add(SyncReportRow("group-added", "GROUP:" + groupPath, directory, string.Empty, directory, "ok", "Staged clone group directory creation."));
+                    }
+                    else if (EqualsIgnoreCase(status, "removed"))
+                    {
+                        RemoveStagedClonePath(stagedDirectory, stagingRoot);
+                        report.Add(SyncReportRow("group-removed", "GROUP:" + groupPath, directory, string.Empty, directory, "ok", "Staged clone group directory removal."));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    report.Add(SyncReportRow("group-" + status, "GROUP:" + groupPath, directory, string.Empty, directory, "error", ex.GetType().Name + ": " + ex.Message));
+                }
+            }
+
+            return errors;
+        }
+
+        private static void WriteSyncCloneReports(
+            string outDir,
+            string compareDir,
+            string backupDir,
+            List<string[]> report,
+            int updated,
+            int added,
+            int removed,
+            int moved,
+            int skipped,
+            int errors,
+            bool completed)
+        {
+            WriteCsv(
+                Path.Combine(outDir, "sync-clone-report.csv"),
+                new[] { "CheckStatus", "Name", "ClonePath", "CurrentPath", "DestinationPath", "SyncStatus", "Message" },
+                report);
+
+            using (StreamWriter writer = NewUtf8Writer(Path.Combine(outDir, "sync-clone-summary.txt")))
+            {
+                writer.WriteLine("Project clone sync " + (completed ? "completed" : "failed") + " at: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                writer.WriteLine("Clone directory: " + outDir);
+                writer.WriteLine("Latest compare snapshot: " + compareDir);
+                writer.WriteLine("Backup directory: " + (completed ? backupDir : "not created"));
+                writer.WriteLine("Baseline published: " + completed);
+                writer.WriteLine();
+                writer.WriteLine("Updated files: " + updated);
+                writer.WriteLine("Added files: " + added);
+                writer.WriteLine("Removed files: " + removed);
+                writer.WriteLine("Moved/renamed files: " + moved);
+                writer.WriteLine("Skipped files: " + skipped);
+                writer.WriteLine("Errors: " + errors);
+            }
+        }
+
+        private static void CommitStagedSyncWorkspace(string outDir, string stagingDir, string backupDir)
+        {
+            string finalRoot = Path.Combine(outDir, "_root");
+            string finalBlocks = Path.Combine(outDir, "plc-blocks.csv");
+            string finalGroups = Path.Combine(outDir, "block-groups.csv");
+            string finalMetadata = Path.Combine(outDir, "_metadata");
+            string stagedRoot = Path.Combine(stagingDir, "_root");
+            string stagedBlocks = Path.Combine(stagingDir, "plc-blocks.csv");
+            string stagedGroups = Path.Combine(stagingDir, "block-groups.csv");
+            string stagedMetadata = Path.Combine(stagingDir, "_metadata");
+            if (!Directory.Exists(stagedRoot) || !File.Exists(stagedBlocks) || !File.Exists(stagedGroups) || !Directory.Exists(stagedMetadata))
+            {
+                throw new InvalidDataException("Staged sync workspace is incomplete; original clone was not modified.");
+            }
+
+            string backupRoot = Path.Combine(backupDir, "_root");
+            string backupBlocks = Path.Combine(backupDir, "plc-blocks.csv");
+            string backupGroups = Path.Combine(backupDir, "block-groups.csv");
+            string backupMetadata = Path.Combine(backupDir, "_metadata");
+            Directory.CreateDirectory(backupDir);
+            InvalidateCloneCheckBundle(outDir);
+            bool rootBackedUp = false;
+            bool blocksBackedUp = false;
+            bool groupsBackedUp = false;
+            bool metadataBackedUp = false;
+            bool rootInstalled = false;
+            bool blocksInstalled = false;
+            bool groupsInstalled = false;
+            bool metadataInstalled = false;
+            try
+            {
+                Directory.Move(finalRoot, backupRoot);
+                rootBackedUp = true;
+                if (File.Exists(finalBlocks))
+                {
+                    File.Move(finalBlocks, backupBlocks);
+                    blocksBackedUp = true;
+                }
+                if (File.Exists(finalGroups))
+                {
+                    File.Move(finalGroups, backupGroups);
+                    groupsBackedUp = true;
+                }
+                if (Directory.Exists(finalMetadata))
+                {
+                    Directory.Move(finalMetadata, backupMetadata);
+                    metadataBackedUp = true;
+                }
+
+                Directory.Move(stagedRoot, finalRoot);
+                rootInstalled = true;
+                File.Move(stagedBlocks, finalBlocks);
+                blocksInstalled = true;
+                File.Move(stagedGroups, finalGroups);
+                groupsInstalled = true;
+                Directory.Move(stagedMetadata, finalMetadata);
+                metadataInstalled = true;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    if (rootInstalled) MoveSyncCommitOutputAside(finalRoot, Path.Combine(stagingDir, "failed-_root"));
+                    if (blocksInstalled) MoveSyncCommitOutputAside(finalBlocks, Path.Combine(stagingDir, "failed-plc-blocks.csv"));
+                    if (groupsInstalled) MoveSyncCommitOutputAside(finalGroups, Path.Combine(stagingDir, "failed-block-groups.csv"));
+                    if (metadataInstalled) MoveSyncCommitOutputAside(finalMetadata, Path.Combine(stagingDir, "failed-_metadata"));
+                    if (rootBackedUp && Directory.Exists(backupRoot)) Directory.Move(backupRoot, finalRoot);
+                    if (blocksBackedUp && File.Exists(backupBlocks)) File.Move(backupBlocks, finalBlocks);
+                    if (groupsBackedUp && File.Exists(backupGroups)) File.Move(backupGroups, finalGroups);
+                    if (metadataBackedUp && Directory.Exists(backupMetadata)) Directory.Move(backupMetadata, finalMetadata);
+                }
+                catch (Exception rollbackException)
+                {
+                    throw new InvalidOperationException("sync-clone commit failed and rollback was incomplete. Recover from " + backupDir + ".", new AggregateException(ex, rollbackException));
+                }
+
+                throw new InvalidOperationException("sync-clone commit failed; original clone content was restored from the transaction backup.", ex);
+            }
+
+            TryDeleteSyncStaging(stagingDir, Path.GetDirectoryName(stagingDir));
+        }
+
+        private static void MoveSyncCommitOutputAside(string path, string destination)
+        {
+            if (File.Exists(path))
+            {
+                File.Move(path, destination);
+            }
+            else if (Directory.Exists(path))
+            {
+                Directory.Move(path, destination);
+            }
+        }
+
+        private static void TryDeleteSyncStaging(string stagingDir, string stagingRootParent)
+        {
+            try
+            {
+                if (Directory.Exists(stagingDir))
+                {
+                    Directory.Delete(stagingDir, true);
+                }
+                if (Directory.Exists(stagingRootParent) && !Directory.EnumerateFileSystemEntries(stagingRootParent).Any())
+                {
+                    Directory.Delete(stagingRootParent, false);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static string DetermineSyncDestinationPath(string status, string clonePath, string currentPath, string compareRootDir, string rootDir)
@@ -15303,11 +15572,16 @@ namespace OpennessLLM
             }
         }
 
-        private static void WriteSyncedBlockManifest(string outDir, string rootDir, string compareRootDir, List<Dictionary<string, string>> blockRows)
+        private static void WriteSyncedBlockManifest(
+            string manifestOutputPath,
+            string originalManifestPath,
+            string rootDir,
+            string contentRootDir,
+            string compareRootDir,
+            List<Dictionary<string, string>> blockRows)
         {
-            string manifestPath = Path.Combine(outDir, "plc-blocks.csv");
-            Dictionary<string, string> softwarePaths = LoadSoftwarePathsByIdentity(manifestPath);
-            string defaultSoftwarePath = LoadFirstSoftwarePath(manifestPath);
+            Dictionary<string, string> softwarePaths = LoadSoftwarePathsByIdentity(originalManifestPath);
+            string defaultSoftwarePath = LoadFirstSoftwarePath(originalManifestPath);
             List<string[]> rows = new List<string[]>();
 
             foreach (Dictionary<string, string> row in blockRows)
@@ -15341,16 +15615,16 @@ namespace OpennessLLM
                     manifestSoftwarePath,
                     defaultSoftwarePath);
 
-                rows.Add(BuildSyncedBlockManifestRow(row, softwarePath, destinationPath));
+                string contentPath = MapClonePathToAlternateRoot(destinationPath, rootDir, contentRootDir);
+                rows.Add(BuildSyncedBlockManifestRow(row, softwarePath, destinationPath, contentPath));
             }
 
-            WriteCsv(manifestPath, BlockManifestHeaders(), rows);
+            WriteCsv(manifestOutputPath, BlockManifestHeaders(), rows);
         }
 
-        private static void WriteSyncedGroupManifest(string outDir, string rootDir, List<Dictionary<string, string>> groupRows)
+        private static void WriteSyncedGroupManifest(string manifestOutputPath, string originalManifestPath, string rootDir, List<Dictionary<string, string>> groupRows)
         {
-            string oldManifestPath = Path.Combine(outDir, "block-groups.csv");
-            string softwarePath = LoadFirstSoftwarePath(oldManifestPath);
+            string softwarePath = LoadFirstSoftwarePath(originalManifestPath);
             List<string[]> rows = new List<string[]>();
             foreach (Dictionary<string, string> row in groupRows ?? new List<Dictionary<string, string>>())
             {
@@ -15373,39 +15647,60 @@ namespace OpennessLLM
                 });
             }
 
-            WriteCsv(oldManifestPath,
+            WriteCsv(manifestOutputPath,
                 new[] { "SoftwarePath", "ParentGroupPath", "ParentGroupPathDisplay", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Directory" },
                 rows.OrderBy(x => x[3].Length).ThenBy(x => x[3], StringComparer.OrdinalIgnoreCase));
         }
 
+        private static string MapClonePathToAlternateRoot(string path, string rootDir, string alternateRootDir)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            EnsurePathInside(path, rootDir);
+            return Path.Combine(alternateRootDir, MakeRelativePath(rootDir, path));
+        }
+
         private static void WriteCloneMetadata(string outDir)
         {
-            string metadataDir = Path.Combine(outDir, "_metadata");
+            WriteCloneMetadata(
+                outDir,
+                outDir,
+                Path.Combine(outDir, "plc-blocks.csv"),
+                Path.Combine(outDir, "block-groups.csv"));
+        }
+
+        private static void WriteCloneMetadata(string outputDir, string logicalOutDir, string blocksSourcePath, string groupsSourcePath)
+        {
+            string metadataDir = Path.Combine(outputDir, "_metadata");
             Directory.CreateDirectory(metadataDir);
 
-            string blocksCsv = Path.Combine(outDir, "plc-blocks.csv");
-            string groupsCsv = Path.Combine(outDir, "block-groups.csv");
-            List<Dictionary<string, string>> blocks = File.Exists(blocksCsv)
-                ? ReadCsv(blocksCsv)
+            string logicalBlocksCsv = Path.Combine(logicalOutDir, "plc-blocks.csv");
+            string logicalGroupsCsv = Path.Combine(logicalOutDir, "block-groups.csv");
+            string logicalMetadataDir = Path.Combine(logicalOutDir, "_metadata");
+            List<Dictionary<string, string>> blocks = File.Exists(blocksSourcePath)
+                ? ReadCsv(blocksSourcePath)
                 : new List<Dictionary<string, string>>();
-            List<Dictionary<string, string>> groups = File.Exists(groupsCsv)
-                ? ReadCsv(groupsCsv)
+            List<Dictionary<string, string>> groups = File.Exists(groupsSourcePath)
+                ? ReadCsv(groupsSourcePath)
                 : new List<Dictionary<string, string>>();
 
-            File.WriteAllText(Path.Combine(metadataDir, "schema-version.txt"), "3" + Environment.NewLine, new UTF8Encoding(false));
+            File.WriteAllText(Path.Combine(metadataDir, "schema-version.txt"), "4" + Environment.NewLine, new UTF8Encoding(false));
             WriteJsonl(Path.Combine(metadataDir, "blocks.jsonl"), blocks.Select(NormalizeBlockMetadataRow));
             WriteJsonl(Path.Combine(metadataDir, "groups.jsonl"), groups.Select(NormalizeGroupMetadataRow));
 
             using (StreamWriter writer = NewUtf8Writer(Path.Combine(metadataDir, "clone-manifest.json")))
             {
                 writer.WriteLine("{");
-                writer.WriteLine("  \"schemaVersion\": 3,");
+                writer.WriteLine("  \"schemaVersion\": 4,");
                 writer.WriteLine("  \"generatedAt\": " + Json(DateTime.Now.ToString("o")) + ",");
-                writer.WriteLine("  \"cloneDirectory\": " + Json(outDir) + ",");
-                writer.WriteLine("  \"blocksCsv\": " + Json(blocksCsv) + ",");
-                writer.WriteLine("  \"groupsCsv\": " + Json(groupsCsv) + ",");
-                writer.WriteLine("  \"blocksJsonl\": " + Json(Path.Combine(metadataDir, "blocks.jsonl")) + ",");
-                writer.WriteLine("  \"groupsJsonl\": " + Json(Path.Combine(metadataDir, "groups.jsonl")) + ",");
+                writer.WriteLine("  \"cloneDirectory\": " + Json(logicalOutDir) + ",");
+                writer.WriteLine("  \"blocksCsv\": " + Json(logicalBlocksCsv) + ",");
+                writer.WriteLine("  \"groupsCsv\": " + Json(logicalGroupsCsv) + ",");
+                writer.WriteLine("  \"blocksJsonl\": " + Json(Path.Combine(logicalMetadataDir, "blocks.jsonl")) + ",");
+                writer.WriteLine("  \"groupsJsonl\": " + Json(Path.Combine(logicalMetadataDir, "groups.jsonl")) + ",");
                 writer.WriteLine("  \"blockCount\": " + blocks.Count + ",");
                 writer.WriteLine("  \"groupCount\": " + groups.Count + ",");
                 writer.WriteLine("  \"sidecarConvention\": " + Json("<source-file>.meta.json"));
@@ -15447,7 +15742,8 @@ namespace OpennessLLM
                 { "sourceSha256", GetCsvValue(row, "SourceSha256") },
                 { "normalizedSourceSha256", GetCsvValue(row, "NormalizedSourceSha256") },
                 { "status", GetCsvValue(row, "Status") },
-                { "message", GetCsvValue(row, "Message") }
+                { "message", GetCsvValue(row, "Message") },
+                { "sourceOrigin", GetCsvValue(row, "SourceOrigin") }
             };
         }
 
@@ -17225,10 +17521,12 @@ namespace OpennessLLM
             string afterSourceBlockerReportPath = Path.Combine(outDir, "apply-clone-after-check-source-blockers.csv");
             Exception afterCheckException = null;
             bool afterCheckAccepted = false;
+            List<ExplicitNewPromotionReceipt> promotionReceipts = new List<ExplicitNewPromotionReceipt>();
             try
             {
                 CommitCompletedApplyCloneDeletions(outDir, plan);
-                CheckProjectClone(afterApply, outDir);
+                promotionReceipts = BuildSuccessfulCreateBlockReceipts(plan, afterApply, bundle.CheckRunId, rootDir);
+                CheckProjectClone(afterApply, outDir, promotionReceipts);
                 CloneCheckBundleEvidence afterBundle = LoadAndValidateCloneCheckBundle(outDir);
                 if (File.Exists(blockReportPath))
                 {
@@ -17266,7 +17564,7 @@ namespace OpennessLLM
                         "reconciled rows=" + reconciledRows.ToString(CultureInfo.InvariantCulture));
 
                     afterApply = CollectInventory(project, options.ProjectPath);
-                    CheckProjectClone(afterApply, outDir);
+                    CheckProjectClone(afterApply, outDir, promotionReceipts);
                     afterBundle = LoadAndValidateCloneCheckBundle(outDir);
                     if (File.Exists(blockReportPath))
                     {
@@ -17346,6 +17644,56 @@ namespace OpennessLLM
                 string reason = afterCheckException == null ? "after-apply verification rejected the result" : "after-apply verification failed";
                 throw new InvalidOperationException("apply-clone " + reason + ". The open TIA project may contain unsaved changes; close without saving or restore the pre-apply backup.");
             }
+        }
+
+        private static List<ExplicitNewPromotionReceipt> BuildSuccessfulCreateBlockReceipts(
+            List<ApplyPlanItem> plan,
+            InventorySnapshot afterApply,
+            string checkRunId,
+            string rootDir)
+        {
+            List<ExplicitNewPromotionReceipt> receipts = new List<ExplicitNewPromotionReceipt>();
+            foreach (ApplyPlanItem item in (plan ?? new List<ApplyPlanItem>())
+                .Where(x => x != null
+                    && EqualsIgnoreCase(x.Action, "CreateBlock")
+                    && EqualsIgnoreCase(x.CloneProvenance, "explicit-new-local-source")))
+            {
+                EnsurePathInside(item.ClonePath, rootDir);
+                string sourceHash = ComputeNormalizedTextSha256(item.ClonePath);
+                List<BlockRecord> matches = (afterApply == null ? new List<BlockRecord>() : afterApply.Blocks)
+                    .Where(x => EqualsIgnoreCase(x.SoftwarePath, item.SoftwarePath))
+                    .Where(x => EqualsIgnoreCase(EmptyIfNull(x.GroupPath), EmptyIfNull(item.TargetGroupPath)))
+                    .Where(x => EqualsIgnoreCase(x.Name, item.TargetName))
+                    .Where(x => EqualsIgnoreCase(BlockNumberSpace(x), item.NumberSpace))
+                    .Where(x => string.IsNullOrWhiteSpace(item.TargetNumber) || SafeInt(x.Number) == SafeInt(item.TargetNumber))
+                    .Where(x => EqualsIgnoreCase(x.ProgrammingLanguage, item.ProgrammingLanguage))
+                    .ToList();
+                if (matches.Count != 1 || string.IsNullOrWhiteSpace(sourceHash))
+                {
+                    throw new InvalidDataException(
+                        "Completed CreateBlock could not produce one promotion receipt for "
+                        + item.SoftwarePath + "/" + item.TargetName + ".");
+                }
+
+                BlockRecord live = matches[0];
+                receipts.Add(new ExplicitNewPromotionReceipt
+                {
+                    ReceiptId = Guid.NewGuid().ToString("N"),
+                    CheckRunId = checkRunId,
+                    SoftwarePath = item.SoftwarePath,
+                    TargetGroupPath = item.TargetGroupPath,
+                    TargetName = item.TargetName,
+                    TargetNumberSpace = item.NumberSpace,
+                    TargetNumber = item.TargetNumber,
+                    ProgrammingLanguage = item.ProgrammingLanguage,
+                    SourcePath = item.ClonePath,
+                    SourceNormalizedSha256 = sourceHash,
+                    LiveTiaObjectId = live.TiaObjectId,
+                    LiveTiaObjectIdStatus = live.TiaObjectIdStatus
+                });
+            }
+
+            return receipts;
         }
 
         private static void ApplyCloneCommandLegacy(object project, Options options)
@@ -17731,6 +18079,17 @@ namespace OpennessLLM
                 string cloneNumberMode = FirstNonEmpty(GetCsvValue(row, "CloneNumberMode"), isDeletedFromClone ? string.Empty : GetCsvValue(row, "NumberMode"));
                 string cloneAutoNumber = FirstNonEmpty(GetCsvValue(row, "CloneAutoNumber"), isDeletedFromClone ? string.Empty : GetCsvValue(row, "AutoNumber"));
                 string cloneInstanceOfName = FirstNonEmpty(ResolveApplyRowCloneInstanceOfName(row), isDeletedFromClone ? string.Empty : GetCsvValue(row, "InstanceOfName"));
+                string manifestSoftwarePath = GetCsvValue(row, "CloneSoftwarePath");
+                string manifestGroupPath = RowGroupPathKey(row, "CloneGroupPath");
+                string manifestName = GetCsvValue(row, "CloneName");
+                string manifestNumber = GetCsvValue(row, "CloneNumber");
+                string manifestNumberSpace = FirstNonEmpty(
+                    GetCsvValue(row, "CloneNumberSpace"),
+                    BlockNumberSpace(GetCsvValue(row, "CloneTypeName"), GetCsvValue(row, "CloneProgrammingLanguage")));
+                bool consumesManifestRow = isDeletedFromClone
+                    && !string.IsNullOrWhiteSpace(manifestSoftwarePath)
+                    && !string.IsNullOrWhiteSpace(manifestName)
+                    && !string.IsNullOrWhiteSpace(manifestNumberSpace);
 
                 string currentName = FirstNonEmpty(GetCsvValue(row, "CurrentName"), isCloneOnly ? string.Empty : GetCsvValue(row, "Name"));
                 string currentGroupPath = isCloneOnly ? string.Empty : RowGroupPathKey(row, "CurrentGroupPath");
@@ -17848,6 +18207,14 @@ namespace OpennessLLM
                     WillGenerateSource = willGenerateSource,
                     WillRename = EqualsIgnoreCase(action, "RenameBlock") || EqualsIgnoreCase(action, "RenameAndUpdateSource"),
                     WillDelete = EqualsIgnoreCase(action, "DeleteBlock"),
+                    ConsumesManifestRow = consumesManifestRow,
+                    ManifestSoftwarePath = manifestSoftwarePath,
+                    ManifestGroupPath = manifestGroupPath,
+                    ManifestName = manifestName,
+                    ManifestNumberSpace = manifestNumberSpace,
+                    ManifestNumber = manifestNumber,
+                    ManifestFilePath = GetCsvValue(row, "ClonePath"),
+                    CloneProvenance = GetCsvValue(row, "CloneProvenance"),
                     Message = GetCsvValue(row, "Message")
                 });
             }
@@ -17863,8 +18230,52 @@ namespace OpennessLLM
                 ValidateApplyPlanItem(item, plan, snapshot, rootDir, strictVisualSource, result);
             }
 
+            ValidateApplyDeletionManifestRows(plan, Path.GetDirectoryName(rootDir), result);
             ValidateApplyCloneFinalState(plan, snapshot, result);
             return result;
+        }
+
+        private static void ValidateApplyDeletionManifestRows(List<ApplyPlanItem> plan, string outDir, ApplyPreflightResult result)
+        {
+            List<ApplyPlanItem> trackedDeletions = (plan ?? new List<ApplyPlanItem>())
+                .Where(x => x != null && x.WillDelete && x.ConsumesManifestRow)
+                .ToList();
+            if (trackedDeletions.Count == 0)
+            {
+                return;
+            }
+
+            string manifestPath = Path.Combine(outDir, "plc-blocks.csv");
+            if (!File.Exists(manifestPath))
+            {
+                foreach (ApplyPlanItem item in trackedDeletions)
+                {
+                    AddPreflightIssue(result, "error", "DELETE_MANIFEST_RECEIPT_INVALID", item, (BlockRecord)null, "Tracked clone deletion cannot be authorized because plc-blocks.csv is missing.");
+                }
+
+                return;
+            }
+
+            List<Dictionary<string, string>> rows = ReadCsv(manifestPath);
+            HashSet<int> claimedRows = new HashSet<int>();
+            foreach (ApplyPlanItem item in trackedDeletions)
+            {
+                List<int> matches = rows
+                    .Select((row, index) => new { Row = row, Index = index })
+                    .Where(x => ManifestRowMatchesApplyDeletion(x.Row, item))
+                    .Select(x => x.Index)
+                    .ToList();
+                if (matches.Count != 1 || !claimedRows.Add(matches.Count == 1 ? matches[0] : -1))
+                {
+                    AddPreflightIssue(
+                        result,
+                        "error",
+                        "DELETE_MANIFEST_RECEIPT_INVALID",
+                        item,
+                        (BlockRecord)null,
+                        "DeleteTrackedBlockWithMissingSource must consume exactly one unique manifest row before any TIA write; matched " + matches.Count.ToString(CultureInfo.InvariantCulture) + ".");
+                }
+            }
         }
 
         private static void ValidateApplyPlanItem(ApplyPlanItem item, List<ApplyPlanItem> plan, InventorySnapshot snapshot, string rootDir, bool strictVisualSource, ApplyPreflightResult result)
@@ -17877,6 +18288,18 @@ namespace OpennessLLM
             else if (selectedSoftware.Count != 1 || !EqualsIgnoreCase(item.SoftwarePath, selectedSoftware[0].Path))
             {
                 AddPreflightIssue(result, "error", "SOFTWARE_PATH_MISMATCH", item, (BlockRecord)null, "Apply plan row does not target the bundle-selected PlcSoftware.");
+            }
+
+            if (EqualsIgnoreCase(item.CloneProvenance, "explicit-new-local-source")
+                && !EqualsIgnoreCase(item.Action, "CreateBlock"))
+            {
+                AddPreflightIssue(
+                    result,
+                    "error",
+                    "EXPLICIT_NEW_ADOPTION_FORBIDDEN",
+                    item,
+                    (BlockRecord)null,
+                    "An explicit-new source already collides with a live TIA block. Pending provenance can be consumed only by a successful CreateBlock receipt with matching language and normalized source content; adopting or overwriting a pre-existing block is forbidden.");
             }
 
             if (EqualsIgnoreCase(item.Action, "ForbiddenMove"))
@@ -18323,15 +18746,15 @@ namespace OpennessLLM
                 new[]
                 {
                     "Severity", "SoftwarePath", "Action", "Status", "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumberSpace", "CurrentNumber",
-                    "TargetGroupPath", "TargetGroupPathDisplay", "TargetGroupPathKey", "TargetName", "TargetNumberSpace", "TargetNumber", "SourcePath",
-                    "WillCreateGroup", "WillRename", "WillDelete", "WillGenerateSource",
+                    "TargetGroupPath", "TargetGroupPathDisplay", "TargetGroupPathKey", "TargetName", "TargetNumberSpace", "TargetNumber", "SourcePath", "CloneProvenance",
+                    "WillCreateGroup", "WillRename", "WillDelete", "ConsumesManifestRow", "ManifestSoftwarePath", "ManifestGroupPath", "ManifestName", "ManifestNumberSpace", "ManifestNumber", "ManifestFilePath", "WillGenerateSource",
                     "LiveSourceDriftChecked", "LiveSourceStatus", "CurrentSourceSha256", "LiveSourceSha256", "LiveSourcePath", "Message"
                 },
                 plan.Select(x => new[]
                 {
                     PreflightSeverityForItem(x, issues), x.SoftwarePath, x.Action, x.Status, x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumberSpace, x.CurrentNumber,
-                    x.TargetGroupPath, x.TargetGroupPathDisplay, x.TargetGroupPath, x.TargetName, x.NumberSpace, x.TargetNumber, x.ClonePath,
-                    x.WillCreateGroup.ToString(), x.WillRename.ToString(), x.WillDelete.ToString(), x.WillGenerateSource.ToString(),
+                    x.TargetGroupPath, x.TargetGroupPathDisplay, x.TargetGroupPath, x.TargetName, x.NumberSpace, x.TargetNumber, x.ClonePath, x.CloneProvenance,
+                    x.WillCreateGroup.ToString(), x.WillRename.ToString(), x.WillDelete.ToString(), x.ConsumesManifestRow.ToString(), x.ManifestSoftwarePath, x.ManifestGroupPath, x.ManifestName, x.ManifestNumberSpace, x.ManifestNumber, x.ManifestFilePath, x.WillGenerateSource.ToString(),
                     x.LiveSourceDriftChecked.ToString(), x.LiveSourceStatus, x.CurrentSourceSha256, x.LiveSourceSha256, x.LiveSourcePath, x.Message
                 }));
 
@@ -18927,9 +19350,17 @@ namespace OpennessLLM
                 { "targetNumberSpace", item.NumberSpace },
                 { "targetNumber", item.TargetNumber },
                 { "sourcePath", item.ClonePath },
+                { "cloneProvenance", item.CloneProvenance },
                 { "willCreateGroup", item.WillCreateGroup.ToString() },
                 { "willRename", item.WillRename.ToString() },
                 { "willDelete", item.WillDelete.ToString() },
+                { "consumesManifestRow", item.ConsumesManifestRow.ToString() },
+                { "manifestSoftwarePath", item.ManifestSoftwarePath },
+                { "manifestGroupPath", item.ManifestGroupPath },
+                { "manifestName", item.ManifestName },
+                { "manifestNumberSpace", item.ManifestNumberSpace },
+                { "manifestNumber", item.ManifestNumber },
+                { "manifestFilePath", item.ManifestFilePath },
                 { "willGenerateSource", item.WillGenerateSource.ToString() },
                 { "liveSourceDriftChecked", item.LiveSourceDriftChecked.ToString() },
                 { "liveSourceStatus", item.LiveSourceStatus },
@@ -20427,7 +20858,7 @@ namespace OpennessLLM
                 "ProgrammingLanguage", "BlockType", "TypeName", "SourceTypeName",
                 "InstanceOfName", "InstanceOfNumber", "InstanceOfType", "SecondaryType",
                 "MemoryLayout", "IsConsistent", "IsKnowHowProtected", "TiaObjectId", "TiaObjectIdStatus",
-                "FilePath", "SourceSha256", "NormalizedSourceSha256", "Status", "Message"
+                "FilePath", "SourceSha256", "NormalizedSourceSha256", "Status", "Message", "SourceOrigin"
             };
         }
 
@@ -20464,15 +20895,18 @@ namespace OpennessLLM
                 File.Exists(filePath) ? ComputeFileSha256(filePath) : string.Empty,
                 File.Exists(filePath) ? ComputeNormalizedTextSha256(filePath) : string.Empty,
                 status,
-                message
+                message,
+                File.Exists(filePath)
+                    ? "exported-source"
+                    : (EqualsIgnoreCase(status, "unsupported-language") ? "inventory-only-unsupported" : "unknown")
             };
         }
 
-        private static string[] BuildSyncedBlockManifestRow(Dictionary<string, string> row, string softwarePath, string destinationPath)
+        private static string[] BuildSyncedBlockManifestRow(Dictionary<string, string> row, string softwarePath, string destinationPath, string contentPath)
         {
             string language = GetCsvValue(row, "ProgrammingLanguage");
             string typeName = GetCsvValue(row, "TypeName");
-            string sourceTypeName = FirstNonEmpty(GetCsvValue(row, "SourceTypeName"), File.Exists(destinationPath) ? InferBlockTypeNameFromSourceFile(destinationPath, language) : string.Empty);
+            string sourceTypeName = FirstNonEmpty(GetCsvValue(row, "SourceTypeName"), File.Exists(contentPath) ? InferBlockTypeNameFromSourceFile(contentPath, language) : string.Empty);
             return new[]
             {
                 softwarePath,
@@ -20498,10 +20932,11 @@ namespace OpennessLLM
                 GetCsvValue(row, "TiaObjectId"),
                 GetCsvValue(row, "TiaObjectIdStatus"),
                 destinationPath,
-                File.Exists(destinationPath) ? ComputeFileSha256(destinationPath) : string.Empty,
-                File.Exists(destinationPath) ? ComputeNormalizedTextSha256(destinationPath) : string.Empty,
+                File.Exists(contentPath) ? ComputeFileSha256(contentPath) : string.Empty,
+                File.Exists(contentPath) ? ComputeNormalizedTextSha256(contentPath) : string.Empty,
                 "ok",
-                "Synced from latest clone check."
+                "Synced from latest clone check.",
+                "exported-source"
             };
         }
 
@@ -20899,7 +21334,12 @@ namespace OpennessLLM
                     string clonePath = Path.Combine(rootDir, relativePath);
                     bool cloneFileExists = File.Exists(clonePath);
                     string manifestStatus = GetCsvValue(row, "Status");
-                    if (!cloneFileExists && EqualsIgnoreCase(manifestStatus, "unsupported-language"))
+                    string manifestSourceOrigin = GetCsvValue(row, "SourceOrigin");
+                    bool inventoryOnlyUnsupported = !cloneFileExists
+                        && EqualsIgnoreCase(manifestSourceOrigin, "inventory-only-unsupported")
+                        && EqualsIgnoreCase(manifestStatus, "unsupported-language")
+                        && !IsCloneSourceExportableLanguage(language);
+                    if (!cloneFileExists && inventoryOnlyUnsupported)
                     {
                         // init-clone inventories pre-existing LAD/FBD/GRAPH
                         // blocks even though no source clone was ever produced.
@@ -20910,6 +21350,11 @@ namespace OpennessLLM
                         // closed.
                         continue;
                     }
+
+                    bool sourceOriginContradictory = !string.IsNullOrWhiteSpace(manifestSourceOrigin)
+                        && !EqualsIgnoreCase(manifestSourceOrigin, "exported-source");
+                    bool manifestProvesTrackedSource = EqualsIgnoreCase(manifestSourceOrigin, "exported-source")
+                        || (string.IsNullOrWhiteSpace(manifestSourceOrigin) && cloneFileExists);
 
                     string sourceName = cloneFileExists ? TryReadBlockNameFromSource(clonePath) : string.Empty;
                     DbSourceInfo dbSource = cloneFileExists ? ParseDbSource(clonePath) : new DbSourceInfo();
@@ -20978,7 +21423,9 @@ namespace OpennessLLM
                         CurrentPath = string.Empty,
                         ExportStatus = cloneFileExists ? manifestStatus : "missing-source",
                         ExportMessage = cloneFileExists ? GetCsvValue(row, "Message") : "Tracked manifest source file is missing from _root.",
-                        Provenance = "tracked-baseline"
+                        Provenance = sourceOriginContradictory || (!cloneFileExists && !manifestProvesTrackedSource)
+                            ? "unknown-orphaned"
+                            : "tracked-baseline"
                     });
                 }
             }
@@ -20999,35 +21446,57 @@ namespace OpennessLLM
         }
 
         private static int PromoteMatchedExplicitNewSources(
-            InventorySnapshot snapshot,
             string outDir,
             string rootDir,
-            List<CloneBlockRecord> cloneBlocks)
+            List<CloneBlockRecord> cloneBlocks,
+            List<CloneBlockRecord> currentBlocks,
+            List<ExplicitNewPromotionReceipt> receipts)
         {
             List<CloneBlockRecord> pending = (cloneBlocks ?? new List<CloneBlockRecord>())
                 .Where(x => x != null
                     && EqualsIgnoreCase(x.Provenance, "explicit-new-local-source")
                     && CloneSourceFileExists(x))
                 .ToList();
-            if (pending.Count == 0)
+            List<ExplicitNewPromotionReceipt> usableReceipts = (receipts ?? new List<ExplicitNewPromotionReceipt>())
+                .Where(x => x != null)
+                .ToList();
+            if (pending.Count == 0 || usableReceipts.Count == 0)
             {
                 return 0;
             }
 
-            List<KeyValuePair<CloneBlockRecord, BlockRecord>> promotions = new List<KeyValuePair<CloneBlockRecord, BlockRecord>>();
-            foreach (CloneBlockRecord clone in pending)
+            List<ExplicitNewPromotionCandidate> promotions = new List<ExplicitNewPromotionCandidate>();
+            foreach (ExplicitNewPromotionReceipt receipt in usableReceipts)
             {
-                List<BlockRecord> matches = (snapshot == null ? new List<BlockRecord>() : snapshot.Blocks)
-                    .Where(x => EqualsIgnoreCase(x.SoftwarePath, clone.SoftwarePath))
-                    .Where(x => EqualsIgnoreCase(EmptyIfNull(x.GroupPath), EmptyIfNull(clone.GroupPath)))
-                    .Where(x => EqualsIgnoreCase(x.Name, clone.Name))
-                    .Where(x => EqualsIgnoreCase(BlockNumberSpace(x), FirstNonEmpty(clone.NumberSpace, BlockNumberSpace(clone.TypeName, clone.ProgrammingLanguage))))
-                    .Where(x => string.IsNullOrWhiteSpace(clone.Number) || SafeInt(x.Number) == SafeInt(clone.Number))
+                ValidateExplicitNewPromotionReceipt(receipt, rootDir);
+                List<CloneBlockRecord> cloneMatches = pending
+                    .Where(x => ExplicitNewReceiptMatchesClone(receipt, x))
                     .ToList();
-                if (matches.Count == 1)
+                List<CloneBlockRecord> liveMatches = (currentBlocks ?? new List<CloneBlockRecord>())
+                    .Where(x => ExplicitNewReceiptMatchesLive(receipt, x))
+                    .ToList();
+                if (cloneMatches.Count != 1 || liveMatches.Count != 1)
                 {
-                    promotions.Add(new KeyValuePair<CloneBlockRecord, BlockRecord>(clone, matches[0]));
+                    throw new InvalidDataException(
+                        "Successful CreateBlock receipt does not resolve to exactly one pending source and one exportable live block: "
+                        + receipt.SoftwarePath + "/" + receipt.TargetName + "; pending matches="
+                        + cloneMatches.Count.ToString(CultureInfo.InvariantCulture) + "; live matches="
+                        + liveMatches.Count.ToString(CultureInfo.InvariantCulture) + ".");
                 }
+
+                CloneBlockRecord clone = cloneMatches[0];
+                CloneBlockRecord live = liveMatches[0];
+                if (!EqualsIgnoreCase(clone.ProgrammingLanguage, live.ProgrammingLanguage)
+                    || string.IsNullOrWhiteSpace(clone.NormalizedSourceSha256)
+                    || !EqualsIgnoreCase(clone.NormalizedSourceSha256, live.NormalizedSourceSha256)
+                    || !EqualsIgnoreCase(receipt.SourceNormalizedSha256, live.NormalizedSourceSha256))
+                {
+                    throw new InvalidDataException(
+                        "Successful CreateBlock receipt cannot promote a source unless exportable language and normalized source content match the live block: "
+                        + receipt.SoftwarePath + "/" + receipt.TargetName + ".");
+                }
+
+                promotions.Add(new ExplicitNewPromotionCandidate { Clone = clone, Current = live, Receipt = receipt });
             }
 
             if (promotions.Count == 0)
@@ -21040,41 +21509,305 @@ namespace OpennessLLM
             List<Dictionary<string, string>> existingRows = File.Exists(manifestPath)
                 ? ReadCsv(manifestPath)
                 : new List<Dictionary<string, string>>();
-            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
+            ValidateUniquePromotionBatch(promotions);
+            foreach (ExplicitNewPromotionCandidate promotion in promotions)
             {
-                if (existingRows.Any(row => ManifestRowMatchesBlock(row, promotion.Value)))
+                if (existingRows.Any(row => ManifestRowMatchesCloneRecord(row, promotion.Current)))
                 {
                     throw new InvalidDataException(
                         "Explicit-new source collides with an already tracked manifest identity: "
-                        + promotion.Key.SoftwarePath + "/" + promotion.Key.Name + ".");
+                        + promotion.Clone.SoftwarePath + "/" + promotion.Clone.Name + ".");
                 }
-            }
-
-            // Consume the one-shot exemption before publishing tracked manifest
-            // rows. If interrupted between the two steps, the source becomes
-            // unknown/orphaned and remains fail-closed rather than becoming new
-            // again after a later manifest loss.
-            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
-            {
-                RewriteExplicitNewSidecarAsTracked(promotion.Key.ClonePath);
             }
 
             List<string[]> rows = existingRows
                 .Select(row => headers.Select(header => GetCsvValue(row, header)).ToArray())
                 .ToList();
-            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
+            foreach (ExplicitNewPromotionCandidate promotion in promotions)
             {
-                CloneBlockRecord clone = promotion.Key;
-                BlockRecord current = promotion.Value;
-                rows.Add(BuildBlockManifestRow(
-                    current,
-                    clone.ClonePath,
-                    "ok",
-                    "Promoted from explicit-new-local-source after an exact live TIA match."));
+                rows.Add(BuildBlockManifestRowFromCloneRecord(
+                    promotion.Current,
+                    promotion.Clone.ClonePath,
+                    "Promoted from explicit-new-local-source by successful CreateBlock receipt " + promotion.Receipt.ReceiptId + "."));
             }
 
-            WriteCsvAtomically(manifestPath, headers, rows, outDir);
+            CommitProvenancePromotions(outDir, rootDir, manifestPath, headers, rows, promotions);
             return promotions.Count;
+        }
+
+        private static void ValidateExplicitNewPromotionReceipt(ExplicitNewPromotionReceipt receipt, string rootDir)
+        {
+            if (string.IsNullOrWhiteSpace(receipt.ReceiptId)
+                || string.IsNullOrWhiteSpace(receipt.CheckRunId)
+                || string.IsNullOrWhiteSpace(receipt.SoftwarePath)
+                || string.IsNullOrWhiteSpace(receipt.TargetName)
+                || string.IsNullOrWhiteSpace(receipt.TargetNumberSpace)
+                || string.IsNullOrWhiteSpace(receipt.SourcePath)
+                || string.IsNullOrWhiteSpace(receipt.SourceNormalizedSha256))
+            {
+                throw new InvalidDataException("Successful CreateBlock promotion receipt is incomplete.");
+            }
+
+            EnsurePathInside(receipt.SourcePath, rootDir);
+            if (!File.Exists(receipt.SourcePath)
+                || !EqualsIgnoreCase(ComputeNormalizedTextSha256(receipt.SourcePath), receipt.SourceNormalizedSha256))
+            {
+                throw new InvalidDataException("Successful CreateBlock promotion receipt source is missing or changed: " + receipt.SourcePath);
+            }
+        }
+
+        private static bool ExplicitNewReceiptMatchesClone(ExplicitNewPromotionReceipt receipt, CloneBlockRecord clone)
+        {
+            return receipt != null
+                && clone != null
+                && EqualsIgnoreCase(Path.GetFullPath(receipt.SourcePath), Path.GetFullPath(clone.ClonePath))
+                && EqualsIgnoreCase(receipt.SoftwarePath, clone.SoftwarePath)
+                && EqualsIgnoreCase(EmptyIfNull(receipt.TargetGroupPath), EmptyIfNull(clone.GroupPath))
+                && EqualsIgnoreCase(receipt.TargetName, clone.Name)
+                && EqualsIgnoreCase(receipt.TargetNumberSpace, FirstNonEmpty(clone.NumberSpace, BlockNumberSpace(clone.TypeName, clone.ProgrammingLanguage)))
+                && (string.IsNullOrWhiteSpace(receipt.TargetNumber)
+                    || SafeInt(receipt.TargetNumber) == SafeInt(clone.Number))
+                && EqualsIgnoreCase(receipt.ProgrammingLanguage, clone.ProgrammingLanguage)
+                && EqualsIgnoreCase(receipt.SourceNormalizedSha256, clone.NormalizedSourceSha256);
+        }
+
+        private static bool ExplicitNewReceiptMatchesLive(ExplicitNewPromotionReceipt receipt, CloneBlockRecord live)
+        {
+            if (receipt == null || live == null || !EqualsIgnoreCase(live.ExportStatus, "ok"))
+            {
+                return false;
+            }
+
+            bool objectIdentityMatches = string.IsNullOrWhiteSpace(receipt.LiveTiaObjectId)
+                || string.IsNullOrWhiteSpace(live.TiaObjectId)
+                || EqualsIgnoreCase(receipt.LiveTiaObjectId, live.TiaObjectId);
+            return objectIdentityMatches
+                && EqualsIgnoreCase(receipt.SoftwarePath, live.SoftwarePath)
+                && EqualsIgnoreCase(EmptyIfNull(receipt.TargetGroupPath), EmptyIfNull(live.GroupPath))
+                && EqualsIgnoreCase(receipt.TargetName, live.Name)
+                && EqualsIgnoreCase(receipt.TargetNumberSpace, FirstNonEmpty(live.NumberSpace, BlockNumberSpace(live.TypeName, live.ProgrammingLanguage)))
+                && (string.IsNullOrWhiteSpace(receipt.TargetNumber)
+                    || SafeInt(receipt.TargetNumber) == SafeInt(live.Number))
+                && EqualsIgnoreCase(receipt.ProgrammingLanguage, live.ProgrammingLanguage)
+                && EqualsIgnoreCase(receipt.SourceNormalizedSha256, live.NormalizedSourceSha256);
+        }
+
+        private static void ValidateUniquePromotionBatch(List<ExplicitNewPromotionCandidate> promotions)
+        {
+            List<ExplicitNewPromotionCandidate> batch = promotions ?? new List<ExplicitNewPromotionCandidate>();
+            if (batch.GroupBy(x => x.Receipt.ReceiptId, StringComparer.OrdinalIgnoreCase).Any(x => x.Count() != 1)
+                || batch.Select(x => x.Receipt.CheckRunId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 1
+                || batch.GroupBy(x => Path.GetFullPath(x.Clone.ClonePath), StringComparer.OrdinalIgnoreCase).Any(x => x.Count() != 1)
+                || batch.GroupBy(x => PromotionIdentity(x.Clone), StringComparer.OrdinalIgnoreCase).Any(x => x.Count() != 1)
+                || batch.GroupBy(x => PromotionIdentity(x.Current), StringComparer.OrdinalIgnoreCase).Any(x => x.Count() != 1)
+                || batch.Where(x => !string.IsNullOrWhiteSpace(x.Current.TiaObjectId))
+                    .GroupBy(x => x.Current.TiaObjectId, StringComparer.OrdinalIgnoreCase)
+                    .Any(x => x.Count() != 1))
+            {
+                throw new InvalidDataException("Explicit-new promotion batch is not one-to-one across source paths, target identities, and live blocks.");
+            }
+        }
+
+        private static string PromotionIdentity(CloneBlockRecord block)
+        {
+            return block == null
+                ? string.Empty
+                : EmptyIfNull(block.SoftwarePath) + "|" + EmptyIfNull(block.GroupPath) + "|" + EmptyIfNull(block.Name) + "|"
+                    + FirstNonEmpty(block.NumberSpace, BlockNumberSpace(block.TypeName, block.ProgrammingLanguage)) + "|" + EmptyIfNull(block.Number);
+        }
+
+        private static string[] BuildBlockManifestRowFromCloneRecord(CloneBlockRecord block, string filePath, string message)
+        {
+            return new[]
+            {
+                block.SoftwarePath, block.GroupPath, block.GroupPathDisplay, block.GroupPath, block.Name, block.Number,
+                block.AutoNumber, block.NumberMode, FirstNonEmpty(block.NumberSpace, BlockNumberSpace(block.TypeName, block.ProgrammingLanguage)),
+                block.ProgrammingLanguage, block.BlockType, block.TypeName, block.SourceTypeName,
+                block.InstanceOfName, block.InstanceOfNumber, block.InstanceOfType, block.SecondaryType,
+                block.MemoryLayout, block.IsConsistent, block.IsKnowHowProtected, block.TiaObjectId, block.TiaObjectIdStatus,
+                filePath, ComputeFileSha256(filePath), ComputeNormalizedTextSha256(filePath), "ok", message, "exported-source"
+            };
+        }
+
+        private static void CommitProvenancePromotions(
+            string outDir,
+            string rootDir,
+            string manifestPath,
+            string[] headers,
+            List<string[]> rows,
+            List<ExplicitNewPromotionCandidate> promotions)
+        {
+            string publishRoot = Path.Combine(outDir, "_manifest-publish");
+            string publishDir = Path.Combine(publishRoot, "run-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(publishDir);
+            string stagedManifestPath = Path.Combine(publishDir, "plc-blocks.csv");
+            string journalPath = Path.Combine(publishDir, "provenance-promotions.csv");
+            string statePath = Path.Combine(publishDir, "provenance-promotion.json");
+
+            foreach (ExplicitNewPromotionCandidate promotion in promotions)
+            {
+                string sidecarPath = promotion.Clone.ClonePath + ".meta.json";
+                Dictionary<string, string> sidecar = ParseStrictFlatJsonObject(File.ReadAllText(sidecarPath, Encoding.UTF8), sidecarPath);
+                if (!EqualsIgnoreCase(SidecarValue(sidecar, "sourceOrigin"), "explicit-new-local-source")
+                    || !EqualsIgnoreCase(SidecarValue(sidecar, "softwarePath"), promotion.Clone.SoftwarePath))
+                {
+                    throw new InvalidDataException("Explicit-new promotion sidecar changed before transaction staging: " + sidecarPath);
+                }
+            }
+
+            WriteCsv(stagedManifestPath, headers, rows);
+            WriteCsv(
+                journalPath,
+                new[] { "ReceiptId", "CheckRunId", "SourcePath", "SidecarPath", "SourceNormalizedSha256", "SoftwarePath", "GroupPath", "Name", "NumberSpace", "Number", "ProgrammingLanguage", "LiveTiaObjectId", "LiveTiaObjectIdStatus" },
+                promotions.Select(x => new[]
+                {
+                    x.Receipt.ReceiptId,
+                    x.Receipt.CheckRunId,
+                    x.Clone.ClonePath,
+                    x.Clone.ClonePath + ".meta.json",
+                    x.Clone.NormalizedSourceSha256,
+                    x.Clone.SoftwarePath,
+                    x.Clone.GroupPath,
+                    x.Clone.Name,
+                    FirstNonEmpty(x.Clone.NumberSpace, BlockNumberSpace(x.Clone.TypeName, x.Clone.ProgrammingLanguage)),
+                    x.Clone.Number,
+                    x.Receipt.ProgrammingLanguage,
+                    x.Receipt.LiveTiaObjectId,
+                    x.Receipt.LiveTiaObjectIdStatus
+                }));
+            WriteFlatJsonObjectAtomically(
+                statePath,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "state", "ready" },
+                    { "manifestPath", Path.GetFullPath(manifestPath) },
+                    { "manifestSha256", ComputeFileSha256(stagedManifestPath) },
+                    { "promotionCount", promotions.Count.ToString(CultureInfo.InvariantCulture) }
+                });
+
+            FinishProvenancePromotionTransaction(outDir, rootDir, publishDir);
+        }
+
+        private static void RecoverPendingProvenancePromotions(string outDir, string rootDir)
+        {
+            string publishRoot = Path.Combine(outDir, "_manifest-publish");
+            if (!Directory.Exists(publishRoot))
+            {
+                return;
+            }
+
+            foreach (string publishDir in Directory.GetDirectories(publishRoot, "run-*", SearchOption.TopDirectoryOnly).OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+            {
+                if (File.Exists(Path.Combine(publishDir, "provenance-promotion.json")))
+                {
+                    FinishProvenancePromotionTransaction(outDir, rootDir, publishDir);
+                }
+            }
+
+            if (Directory.Exists(publishRoot) && !Directory.EnumerateFileSystemEntries(publishRoot).Any())
+            {
+                Directory.Delete(publishRoot, false);
+            }
+        }
+
+        private static void FinishProvenancePromotionTransaction(string outDir, string rootDir, string publishDir)
+        {
+            EnsurePathInside(publishDir, Path.Combine(outDir, "_manifest-publish"));
+            string statePath = Path.Combine(publishDir, "provenance-promotion.json");
+            string journalPath = Path.Combine(publishDir, "provenance-promotions.csv");
+            Dictionary<string, string> state = ParseStrictFlatJsonObject(File.ReadAllText(statePath, Encoding.UTF8), statePath);
+            if (!EqualsIgnoreCase(SidecarValue(state, "state"), "ready"))
+            {
+                throw new InvalidDataException("Provenance promotion transaction is not ready: " + publishDir);
+            }
+
+            string manifestPath = SidecarValue(state, "manifestPath");
+            string expectedManifestHash = SidecarValue(state, "manifestSha256");
+            int expectedCount;
+            if (string.IsNullOrWhiteSpace(manifestPath)
+                || string.IsNullOrWhiteSpace(expectedManifestHash)
+                || !int.TryParse(SidecarValue(state, "promotionCount"), NumberStyles.None, CultureInfo.InvariantCulture, out expectedCount)
+                || expectedCount <= 0)
+            {
+                throw new InvalidDataException("Provenance promotion transaction state is incomplete: " + publishDir);
+            }
+
+            EnsurePathInside(manifestPath, outDir);
+            List<Dictionary<string, string>> journal = ReadCsv(journalPath);
+            if (journal.Count != expectedCount)
+            {
+                throw new InvalidDataException("Provenance promotion transaction row count mismatch: " + publishDir);
+            }
+
+            HashSet<string> sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> targetIdentities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Dictionary<string, string> row in journal)
+            {
+                string sourcePath = GetCsvValue(row, "SourcePath");
+                string sidecarPath = GetCsvValue(row, "SidecarPath");
+                string sourceHash = GetCsvValue(row, "SourceNormalizedSha256");
+                if (string.IsNullOrWhiteSpace(GetCsvValue(row, "ReceiptId"))
+                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "CheckRunId"))
+                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "ProgrammingLanguage")))
+                {
+                    throw new InvalidDataException("Provenance promotion recovery receipt is incomplete: " + publishDir);
+                }
+                if (!EqualsIgnoreCase(Path.GetFullPath(sidecarPath), Path.GetFullPath(sourcePath + ".meta.json"))
+                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "SoftwarePath"))
+                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "Name"))
+                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "NumberSpace")))
+                {
+                    throw new InvalidDataException("Provenance promotion recovery target identity is incomplete or inconsistent: " + publishDir);
+                }
+                string targetIdentity = GetCsvValue(row, "SoftwarePath") + "|" + RowGroupPathKey(row, "GroupPath") + "|"
+                    + GetCsvValue(row, "Name") + "|" + GetCsvValue(row, "NumberSpace") + "|" + GetCsvValue(row, "Number");
+                EnsurePathInside(sourcePath, rootDir);
+                EnsurePathInside(sidecarPath, rootDir);
+                if (!sourcePaths.Add(Path.GetFullPath(sourcePath)) || !targetIdentities.Add(targetIdentity))
+                {
+                    throw new InvalidDataException("Provenance promotion recovery journal is not one-to-one: " + publishDir);
+                }
+
+                if (!File.Exists(sourcePath) || !EqualsIgnoreCase(ComputeNormalizedTextSha256(sourcePath), sourceHash))
+                {
+                    throw new InvalidDataException("Provenance promotion source changed before transaction completion: " + sourcePath);
+                }
+
+                Dictionary<string, string> sidecar = ParseStrictFlatJsonObject(File.ReadAllText(sidecarPath, Encoding.UTF8), sidecarPath);
+                string origin = SidecarValue(sidecar, "sourceOrigin");
+                if (EqualsIgnoreCase(origin, "explicit-new-local-source"))
+                {
+                    sidecar["sourceOrigin"] = "tracked-baseline";
+                    WriteFlatJsonObjectAtomically(sidecarPath, sidecar);
+                }
+                else if (!EqualsIgnoreCase(origin, "tracked-baseline"))
+                {
+                    throw new InvalidDataException("Provenance promotion sidecar is neither pending nor consumed: " + sidecarPath);
+                }
+            }
+
+            string stagedManifestPath = Path.Combine(publishDir, "plc-blocks.csv");
+            if (File.Exists(stagedManifestPath))
+            {
+                if (!EqualsIgnoreCase(ComputeFileSha256(stagedManifestPath), expectedManifestHash))
+                {
+                    throw new InvalidDataException("Staged provenance manifest hash mismatch: " + stagedManifestPath);
+                }
+
+                PublishFileAtomically(stagedManifestPath, manifestPath, publishDir);
+            }
+
+            if (!File.Exists(manifestPath) || !EqualsIgnoreCase(ComputeFileSha256(manifestPath), expectedManifestHash))
+            {
+                throw new InvalidDataException("Published provenance manifest hash mismatch: " + manifestPath);
+            }
+
+            Directory.Delete(publishDir, true);
+            string publishRoot = Path.GetDirectoryName(publishDir);
+            if (Directory.Exists(publishRoot) && !Directory.EnumerateFileSystemEntries(publishRoot).Any())
+            {
+                Directory.Delete(publishRoot, false);
+            }
         }
 
         private static void RewriteExplicitNewSidecarAsTracked(string sourcePath)
@@ -21107,9 +21840,28 @@ namespace OpennessLLM
                 && SafeInt(GetCsvValue(row, "Number")) == SafeInt(block.Number);
         }
 
+        private static bool ManifestRowMatchesCloneRecord(Dictionary<string, string> row, CloneBlockRecord block)
+        {
+            if (row == null || block == null)
+            {
+                return false;
+            }
+
+            string rowTypeName = GetCsvValue(row, "TypeName");
+            string rowLanguage = GetCsvValue(row, "ProgrammingLanguage");
+            string rowNumberSpace = FirstNonEmpty(GetCsvValue(row, "NumberSpace"), BlockNumberSpace(rowTypeName, rowLanguage));
+            return EqualsIgnoreCase(GetCsvValue(row, "SoftwarePath"), block.SoftwarePath)
+                && EqualsIgnoreCase(RowGroupPathKey(row, "GroupPath"), EmptyIfNull(block.GroupPath))
+                && EqualsIgnoreCase(GetCsvValue(row, "Name"), block.Name)
+                && EqualsIgnoreCase(rowNumberSpace, FirstNonEmpty(block.NumberSpace, BlockNumberSpace(block.TypeName, block.ProgrammingLanguage)))
+                && SafeInt(GetCsvValue(row, "Number")) == SafeInt(block.Number);
+        }
+
         private static void CommitCompletedApplyCloneDeletions(string outDir, List<ApplyPlanItem> plan)
         {
-            List<ApplyPlanItem> deletions = (plan ?? new List<ApplyPlanItem>()).Where(x => x != null && x.WillDelete).ToList();
+            List<ApplyPlanItem> deletions = (plan ?? new List<ApplyPlanItem>())
+                .Where(x => x != null && x.WillDelete && x.ConsumesManifestRow)
+                .ToList();
             if (deletions.Count == 0)
             {
                 return;
@@ -21129,7 +21881,7 @@ namespace OpennessLLM
                 {
                     throw new InvalidDataException(
                         "Completed DeleteBlock could not consume exactly one tracked manifest row for "
-                        + deletion.SoftwarePath + "/" + deletion.CurrentName + ".");
+                        + deletion.ManifestSoftwarePath + "/" + deletion.ManifestName + ".");
                 }
             }
 
@@ -21146,11 +21898,19 @@ namespace OpennessLLM
             string rowTypeName = GetCsvValue(row, "TypeName");
             string rowLanguage = GetCsvValue(row, "ProgrammingLanguage");
             string rowNumberSpace = FirstNonEmpty(GetCsvValue(row, "NumberSpace"), BlockNumberSpace(rowTypeName, rowLanguage));
-            return EqualsIgnoreCase(GetCsvValue(row, "SoftwarePath"), item.SoftwarePath)
-                && EqualsIgnoreCase(RowGroupPathKey(row, "GroupPath"), EmptyIfNull(item.CurrentGroupPath))
-                && EqualsIgnoreCase(GetCsvValue(row, "Name"), item.CurrentName)
-                && EqualsIgnoreCase(rowNumberSpace, item.CurrentNumberSpace)
-                && SafeInt(GetCsvValue(row, "Number")) == SafeInt(item.CurrentNumber);
+            string rowFilePath = GetCsvValue(row, "FilePath");
+            return item != null
+                && item.ConsumesManifestRow
+                && EqualsIgnoreCase(GetCsvValue(row, "SoftwarePath"), item.ManifestSoftwarePath)
+                && EqualsIgnoreCase(RowGroupPathKey(row, "GroupPath"), EmptyIfNull(item.ManifestGroupPath))
+                && EqualsIgnoreCase(GetCsvValue(row, "Name"), item.ManifestName)
+                && EqualsIgnoreCase(rowNumberSpace, item.ManifestNumberSpace)
+                && (string.IsNullOrWhiteSpace(item.ManifestNumber)
+                    || SafeInt(GetCsvValue(row, "Number")) == SafeInt(item.ManifestNumber))
+                && (string.IsNullOrWhiteSpace(item.ManifestFilePath)
+                    || (!string.IsNullOrWhiteSpace(rowFilePath) && EqualsIgnoreCase(
+                        Path.GetFullPath(GetCsvValue(row, "FilePath")),
+                        Path.GetFullPath(item.ManifestFilePath))));
         }
 
         private static void WriteCsvAtomically(string path, string[] headers, IEnumerable<string[]> rows, string stagingBaseDirectory)
@@ -22564,7 +23324,13 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-check-bundle-interrupted-publication", SelfTestCloneCheckBundleInterruptedPublication);
             RunSelfTestCase(results, outDir, "clone-source-origin-provenance", SelfTestCloneSourceOriginProvenance);
             RunSelfTestCase(results, outDir, "apply-clone-post-delete-transition", SelfTestApplyClonePostDeleteTransition);
+            RunSelfTestCase(results, outDir, "apply-clone-deletion-manifest-receipts", SelfTestApplyCloneDeletionManifestReceipts);
             RunSelfTestCase(results, outDir, "clone-source-origin-lifecycle", SelfTestCloneSourceOriginLifecycle);
+            RunSelfTestCase(results, outDir, "clone-source-origin-promotion-batch", SelfTestCloneSourceOriginPromotionBatch);
+            RunSelfTestCase(results, outDir, "clone-manifest-source-origin-durable", SelfTestCloneManifestSourceOriginDurable);
+            RunSelfTestCase(results, outDir, "clone-command-prevalidation-no-mutation", SelfTestCloneCommandPrevalidationNoMutation);
+            RunSelfTestCase(results, outDir, "sync-clone-transaction-success", SelfTestSyncCloneTransactionSuccess);
+            RunSelfTestCase(results, outDir, "sync-clone-transaction-failure", SelfTestSyncCloneTransactionFailure);
             RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
             RunSelfTestCase(results, outDir, "clone-check-bundle-project-binding", SelfTestCloneCheckBundleProjectBinding);
             RunSelfTestCase(results, outDir, "apply-clone-canonical-source-formatting", SelfTestApplyCloneCanonicalSourceFormatting);
@@ -23839,11 +24605,21 @@ namespace OpennessLLM
 
             string reinitWorkspace = Path.Combine(caseDir, "REINIT_WORKSPACE");
             string staleStagingFile = Path.Combine(reinitWorkspace, "_check-publish", "run-stale", "staged.tmp");
+            string staleManifestStagingFile = Path.Combine(reinitWorkspace, "_manifest-publish", "run-stale", "staged.tmp");
+            string staleSyncStagingFile = Path.Combine(reinitWorkspace, "_sync-staging", "run-stale", "staged.tmp");
             WriteTextFile(staleStagingFile, "interrupted staging\n");
+            WriteTextFile(staleManifestStagingFile, "interrupted manifest staging\n");
+            WriteTextFile(staleSyncStagingFile, "interrupted sync staging\n");
             AssertTrue(IsWorkspaceGeneratedArtifactName("_check-publish"), "check-clone staging parent must be classified as a generated workspace artifact");
+            AssertTrue(IsWorkspaceGeneratedArtifactName("_manifest-publish"), "manifest staging parent must be classified as a generated workspace artifact");
+            AssertTrue(IsWorkspaceGeneratedArtifactName("_sync-staging"), "sync staging parent must be classified as a generated workspace artifact");
             string initBackup = BackupWorkspaceGeneratedArtifacts(reinitWorkspace);
             AssertTrue(!Directory.Exists(Path.Combine(reinitWorkspace, "_check-publish")), "init-workspace backup must remove stale check-clone staging from the active workspace");
+            AssertTrue(!Directory.Exists(Path.Combine(reinitWorkspace, "_manifest-publish")), "init-workspace backup must remove stale manifest staging from the active workspace");
+            AssertTrue(!Directory.Exists(Path.Combine(reinitWorkspace, "_sync-staging")), "init-workspace backup must remove stale sync staging from the active workspace");
             AssertTrue(File.Exists(Path.Combine(initBackup, "_check-publish", "run-stale", "staged.tmp")), "init-workspace backup must preserve stale check-clone staging for recovery");
+            AssertTrue(File.Exists(Path.Combine(initBackup, "_manifest-publish", "run-stale", "staged.tmp")), "init-workspace backup must preserve stale manifest staging for recovery");
+            AssertTrue(File.Exists(Path.Combine(initBackup, "_sync-staging", "run-stale", "staged.tmp")), "init-workspace backup must preserve stale sync staging for recovery");
         }
 
         private static void SelfTestCloneSourceOriginProvenance(string caseDir)
@@ -23855,11 +24631,11 @@ namespace OpennessLLM
             Directory.CreateDirectory(trackedRootDir);
             WriteCsv(
                 Path.Combine(trackedCloneDir, "plc-blocks.csv"),
-                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "BlockType", "TypeName", "FilePath", "Status" },
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "BlockType", "TypeName", "FilePath", "Status", "SourceOrigin" },
                 new[]
                 {
-                    new[] { "PLC", string.Empty, "Widget_Old", "20", "FC", "SCL", "FC", "Siemens.Engineering.SW.Blocks.FC", missingTrackedPath, "ok" },
-                    new[] { "PLC", string.Empty, "Main", "1", "OB", "LAD", "OB", "Siemens.Engineering.SW.Blocks.OB", neverTrackedVisualPath, "unsupported-language" }
+                    new[] { "PLC", string.Empty, "Widget_Old", "20", "FC", "SCL", "FC", "Siemens.Engineering.SW.Blocks.FC", missingTrackedPath, "ok", "exported-source" },
+                    new[] { "PLC", string.Empty, "Main", "1", "OB", "LAD", "OB", "Siemens.Engineering.SW.Blocks.OB", neverTrackedVisualPath, "unsupported-language", "inventory-only-unsupported" }
                 });
             List<CloneBlockRecord> missingTracked = LoadCloneBlockManifest(trackedCloneDir, trackedRootDir);
             AssertTrue(missingTracked.Count == 1, "a manifest-tracked row must remain represented when its _root source is missing");
@@ -24056,7 +24832,7 @@ namespace OpennessLLM
                         "SCL", "FB", "Siemens.Engineering.SW.Blocks.FB", "Siemens.Engineering.SW.Blocks.FB",
                         string.Empty, string.Empty, string.Empty, string.Empty,
                         "Standard", "True", "False", string.Empty, "empty",
-                        missingSource, string.Empty, string.Empty, "ok", "tracked before clone-side deletion"
+                        missingSource, string.Empty, string.Empty, "ok", "tracked before clone-side deletion", "exported-source"
                     }
                 });
 
@@ -24085,6 +24861,13 @@ namespace OpennessLLM
 
             BlockRecord deleted = CreateSelfTestBlock("FB20", 20, "SCL", "Siemens.Engineering.SW.Blocks.FB");
             ApplyPlanItem deletePlan = CreateSelfTestDeletePlanItem(deleted);
+            deletePlan.ConsumesManifestRow = true;
+            deletePlan.ManifestSoftwarePath = tracked[0].SoftwarePath;
+            deletePlan.ManifestGroupPath = tracked[0].GroupPath;
+            deletePlan.ManifestName = tracked[0].Name;
+            deletePlan.ManifestNumberSpace = tracked[0].NumberSpace;
+            deletePlan.ManifestNumber = tracked[0].Number;
+            deletePlan.ManifestFilePath = tracked[0].ClonePath;
             CommitCompletedApplyCloneDeletions(cloneDir, new List<ApplyPlanItem> { deletePlan });
 
             List<CloneBlockRecord> committed = LoadCloneBlockManifest(cloneDir, rootDir);
@@ -24104,10 +24887,36 @@ namespace OpennessLLM
             List<CloneBlockRecord> pending = LoadCloneBlockManifest(cloneDir, rootDir);
             AssertEqual("explicit-new-local-source", pending[0].Provenance, "new local source must begin in pending provenance state");
 
-            BlockRecord live = CreateSelfTestBlock("Widget_New", 31, "SCL", "Siemens.Engineering.SW.Blocks.FC");
-            InventorySnapshot snapshot = CreateSelfTestApplySnapshot(live);
-            int promoted = PromoteMatchedExplicitNewSources(snapshot, cloneDir, rootDir, pending);
-            AssertTrue(promoted == 1, "first exact live match must promote explicit-new provenance exactly once");
+            string differentCurrentPath = Path.Combine(caseDir, "DIFFERENT", "31_Widget_New.scl");
+            WriteTextFile(differentCurrentPath, "FUNCTION \"Widget_New\" : Void\nBEGIN\n    #Different := TRUE;\nEND_FUNCTION\n");
+            CloneBlockRecord differentCurrent = CreateSelfTestCurrentCloneRecord(pending[0], differentCurrentPath);
+            int adoptedWithoutReceipt = PromoteMatchedExplicitNewSources(
+                cloneDir,
+                rootDir,
+                pending,
+                new List<CloneBlockRecord> { differentCurrent },
+                new List<ExplicitNewPromotionReceipt>());
+            AssertTrue(adoptedWithoutReceipt == 0, "a pre-existing same-identity block must not consume pending provenance without a successful CreateBlock receipt");
+            AssertTrue(!File.Exists(Path.Combine(cloneDir, "plc-blocks.csv")), "metadata-only identity must not publish a tracked manifest row");
+            AssertEqual("explicit-new-local-source", SidecarValue(LoadSidecarMetadata(sourcePath), "sourceOrigin"), "metadata-only identity must leave the one-shot sidecar unchanged");
+
+            string preflightRoot = Path.Combine(caseDir, "PREFLIGHT_ROOT");
+            ApplyPlanItem conflictingApply = CreateSelfTestApplyPlanItem(preflightRoot, "UpdateSource", "Widget_New", 31, "SCL", "Siemens.Engineering.SW.Blocks.FC", true, ".scl");
+            conflictingApply.CloneProvenance = "explicit-new-local-source";
+            ApplyPreflightResult conflictingPreflight = RunApplyClonePreflight(new List<ApplyPlanItem> { conflictingApply }, CreateSelfTestApplySnapshot(conflictingApply.Existing), preflightRoot, false);
+            AssertTrue(conflictingPreflight.Issues.Any(x => EqualsIgnoreCase(x.Code, "EXPLICIT_NEW_ADOPTION_FORBIDDEN")), "apply must block adoption or overwrite of a pre-existing same-identity block");
+
+            string currentPath = Path.Combine(caseDir, "CURRENT", "31_Widget_New.scl");
+            WriteTextFile(currentPath, File.ReadAllText(sourcePath, Encoding.UTF8));
+            CloneBlockRecord current = CreateSelfTestCurrentCloneRecord(pending[0], currentPath);
+            ExplicitNewPromotionReceipt receipt = CreateSelfTestPromotionReceipt(pending[0], current, sourcePath, "check-self-test");
+            int promoted = PromoteMatchedExplicitNewSources(
+                cloneDir,
+                rootDir,
+                pending,
+                new List<CloneBlockRecord> { current },
+                new List<ExplicitNewPromotionReceipt> { receipt });
+            AssertTrue(promoted == 1, "a successful CreateBlock receipt plus matching exported content must promote explicit-new provenance exactly once");
             AssertEqual("tracked-baseline", SidecarValue(LoadSidecarMetadata(sourcePath), "sourceOrigin"), "one-shot sidecar origin must be consumed after promotion");
             AssertEqual("tracked-baseline", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "promoted source must be represented by the tracked manifest");
 
@@ -24125,6 +24934,332 @@ namespace OpennessLLM
                 new List<CloneBlockRecord> { afterManifestLoss },
                 new List<CloneBlockRecord> { renamedVisual });
             AssertTrue(BlockingSourceBlockedDiffCount(laterConversion) > 0, "renamed+renumbered visual conversion must fail closed after promotion and later manifest loss");
+        }
+
+        private static void SelfTestApplyCloneDeletionManifestReceipts(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string trackedPath = Path.Combine(rootDir, "Group_A", "20_FB_Tracked.scl");
+            Directory.CreateDirectory(rootDir);
+            WriteCsv(
+                Path.Combine(cloneDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "TypeName", "FilePath", "Status", "SourceOrigin" },
+                new[]
+                {
+                    new[] { "PLC", "Group_A", "FB_Tracked", "20", "FB", "SCL", "Siemens.Engineering.SW.Blocks.FB", trackedPath, "ok", "exported-source" }
+                });
+
+            BlockRecord renamed = CreateSelfTestBlock("FB_Renamed", 20, "SCL", "Siemens.Engineering.SW.Blocks.FB");
+            renamed.GroupPath = "Group_B";
+            renamed.GroupPathDisplay = "Group_B";
+            BlockRecord liveOnly = CreateSelfTestBlock("FC_LiveOnly", 30, "SCL", "Siemens.Engineering.SW.Blocks.FC");
+            InventorySnapshot snapshot = CreateSelfTestApplySnapshot(renamed, liveOnly);
+            List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>
+            {
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Status", "added" }, { "SoftwarePath", "PLC" },
+                    { "CurrentSoftwarePath", "PLC" }, { "CurrentGroupPath", "Group_B" }, { "CurrentName", "FB_Renamed" },
+                    { "CurrentNumberSpace", "FB" }, { "CurrentNumber", "20" }, { "CurrentProgrammingLanguage", "SCL" },
+                    { "CurrentTypeName", "Siemens.Engineering.SW.Blocks.FB" }, { "CurrentNumberMode", "Manual" }, { "CurrentAutoNumber", "False" },
+                    { "CloneSoftwarePath", "PLC" }, { "CloneGroupPath", "Group_A" }, { "CloneName", "FB_Tracked" },
+                    { "CloneNumberSpace", "FB" }, { "CloneNumber", "20" }, { "ClonePath", trackedPath }, { "CloneProvenance", "tracked-baseline" }
+                },
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Status", "added" }, { "SoftwarePath", "PLC" },
+                    { "CurrentSoftwarePath", "PLC" }, { "CurrentGroupPath", string.Empty }, { "CurrentName", "FC_LiveOnly" },
+                    { "CurrentNumberSpace", "FC" }, { "CurrentNumber", "30" }, { "CurrentProgrammingLanguage", "SCL" },
+                    { "CurrentTypeName", "Siemens.Engineering.SW.Blocks.FC" }, { "CurrentNumberMode", "Manual" }, { "CurrentAutoNumber", "False" }
+                }
+            };
+
+            List<ApplyPlanItem> plan = BuildApplyClonePlan(rows, snapshot, rootDir);
+            ApplyPlanItem trackedDelete = plan.Single(x => EqualsIgnoreCase(x.CurrentName, "FB_Renamed"));
+            ApplyPlanItem liveOnlyDelete = plan.Single(x => EqualsIgnoreCase(x.CurrentName, "FC_LiveOnly"));
+            AssertTrue(trackedDelete.ConsumesManifestRow, "renamed/moved tracked deletion must carry an immutable manifest-row receipt");
+            AssertEqual("FB_Tracked", trackedDelete.ManifestName, "tracked deletion receipt must preserve the clone-side name rather than the renamed live name");
+            AssertEqual("Group_A", trackedDelete.ManifestGroupPath, "tracked deletion receipt must preserve the clone-side group");
+            AssertTrue(!liveOnlyDelete.ConsumesManifestRow, "a TIA-only block must be classified as DeleteLiveOnlyBlock and consume no manifest row");
+
+            string manifestName = trackedDelete.ManifestName;
+            trackedDelete.ManifestName = "wrong-preflight-identity";
+            ApplyPreflightResult rejectedPreflight = RunApplyClonePreflight(plan, snapshot, rootDir, false);
+            AssertTrue(rejectedPreflight.Issues.Any(x => EqualsIgnoreCase(x.Code, "DELETE_MANIFEST_RECEIPT_INVALID")), "a missing tracked manifest receipt must be rejected before TIA mutation");
+            trackedDelete.ManifestName = manifestName;
+            ApplyPreflightResult preflight = RunApplyClonePreflight(plan, snapshot, rootDir, false);
+            AssertTrue(!preflight.Issues.Any(x => EqualsIgnoreCase(x.Code, "DELETE_MANIFEST_RECEIPT_INVALID")), "both deletion kinds must be fully validated before TIA mutation");
+            CommitCompletedApplyCloneDeletions(cloneDir, plan);
+            AssertTrue(ReadCsv(Path.Combine(cloneDir, "plc-blocks.csv")).Count == 0, "completed tracked deletion must consume exactly its original manifest row while live-only deletion consumes none");
+        }
+
+        private static void SelfTestCloneSourceOriginPromotionBatch(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "DUPLICATE", "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string sourceA = Path.Combine(rootDir, "31_Widget_A.scl");
+            string sourceB = Path.Combine(rootDir, "31_Widget_B.scl");
+            string sourceText = "FUNCTION \"Widget_Duplicate\" : Void\nEND_FUNCTION\n";
+            WriteTextFile(sourceA, sourceText);
+            WriteTextFile(sourceB, sourceText);
+            WriteTextFile(sourceA + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"31\",\"numberMode\":\"Manual\"}\n");
+            WriteTextFile(sourceB + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"31\",\"numberMode\":\"Manual\"}\n");
+            List<CloneBlockRecord> pending = LoadCloneBlockManifest(cloneDir, rootDir);
+            string currentPath = Path.Combine(caseDir, "DUPLICATE", "CURRENT", "31_Widget_Duplicate.scl");
+            WriteTextFile(currentPath, sourceText);
+            CloneBlockRecord current = CreateSelfTestCurrentCloneRecord(pending[0], currentPath);
+            List<ExplicitNewPromotionReceipt> receipts = pending
+                .Select(x => CreateSelfTestPromotionReceipt(x, current, x.ClonePath, "check-duplicate"))
+                .ToList();
+            bool duplicateRejected = false;
+            try
+            {
+                PromoteMatchedExplicitNewSources(cloneDir, rootDir, pending, new List<CloneBlockRecord> { current }, receipts);
+            }
+            catch (InvalidDataException ex)
+            {
+                duplicateRejected = ex.Message.IndexOf("one-to-one", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            AssertTrue(duplicateRejected, "duplicate target identities in one promotion batch must fail before sidecar or manifest mutation");
+            AssertEqual("explicit-new-local-source", SidecarValue(LoadSidecarMetadata(sourceA), "sourceOrigin"), "duplicate rejection must preserve the first one-shot sidecar");
+            AssertEqual("explicit-new-local-source", SidecarValue(LoadSidecarMetadata(sourceB), "sourceOrigin"), "duplicate rejection must preserve the second one-shot sidecar");
+            AssertTrue(!File.Exists(Path.Combine(cloneDir, "plc-blocks.csv")), "duplicate rejection must not publish a manifest");
+
+            string recoveryDir = Path.Combine(caseDir, "RECOVERY", "CLONE_PROJECT");
+            string recoveryRoot = Path.Combine(recoveryDir, "_root");
+            string recoverySource = Path.Combine(recoveryRoot, "41_Widget_Recovery.scl");
+            WriteTextFile(recoverySource, "FUNCTION \"Widget_Recovery\" : Void\nEND_FUNCTION\n");
+            WriteTextFile(recoverySource + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"41\",\"numberMode\":\"Manual\"}\n");
+            CloneBlockRecord recoveryPending = LoadCloneBlockManifest(recoveryDir, recoveryRoot).Single();
+            string recoveryCurrentPath = Path.Combine(caseDir, "RECOVERY", "CURRENT", "41_Widget_Recovery.scl");
+            WriteTextFile(recoveryCurrentPath, File.ReadAllText(recoverySource, Encoding.UTF8));
+            CloneBlockRecord recoveryCurrent = CreateSelfTestCurrentCloneRecord(recoveryPending, recoveryCurrentPath);
+            string transactionDir = Path.Combine(recoveryDir, "_manifest-publish", "run-interrupted");
+            string stagedManifest = Path.Combine(transactionDir, "plc-blocks.csv");
+            string finalManifest = Path.Combine(recoveryDir, "plc-blocks.csv");
+            WriteCsv(stagedManifest, BlockManifestHeaders(), new[] { BuildBlockManifestRowFromCloneRecord(recoveryCurrent, recoverySource, "recovered") });
+            WriteCsv(
+                Path.Combine(transactionDir, "provenance-promotions.csv"),
+                new[] { "ReceiptId", "CheckRunId", "SourcePath", "SidecarPath", "SourceNormalizedSha256", "SoftwarePath", "GroupPath", "Name", "NumberSpace", "Number", "ProgrammingLanguage", "LiveTiaObjectId", "LiveTiaObjectIdStatus" },
+                new[]
+                {
+                    new[] { "receipt-recovery", "check-recovery", recoverySource, recoverySource + ".meta.json", ComputeNormalizedTextSha256(recoverySource), "PLC", string.Empty, "Widget_Recovery", "FC", "41", "SCL", "self-test-live-object", "available" }
+                });
+            WriteFlatJsonObjectAtomically(
+                Path.Combine(transactionDir, "provenance-promotion.json"),
+                new Dictionary<string, string>
+                {
+                    { "state", "ready" }, { "manifestPath", finalManifest }, { "manifestSha256", ComputeFileSha256(stagedManifest) }, { "promotionCount", "1" }
+                });
+            RecoverPendingProvenancePromotions(recoveryDir, recoveryRoot);
+            AssertEqual("tracked-baseline", SidecarValue(LoadSidecarMetadata(recoverySource), "sourceOrigin"), "interrupted sidecar transition must be recoverable");
+            AssertTrue(File.Exists(finalManifest), "interrupted promotion must recover and publish the prepared manifest");
+            AssertTrue(!Directory.Exists(Path.Combine(recoveryDir, "_manifest-publish")), "completed promotion recovery must clean its staging root");
+        }
+
+        private static void SelfTestCloneManifestSourceOriginDurable(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string exportedPath = Path.Combine(rootDir, "20_Tracked.scl");
+            string inventoryPath = Path.Combine(rootDir, "1_Main.lad");
+            string legacyPath = Path.Combine(rootDir, "2_Legacy.lad");
+            Directory.CreateDirectory(rootDir);
+            WriteCsv(
+                Path.Combine(cloneDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "TypeName", "FilePath", "Status", "SourceOrigin" },
+                new[]
+                {
+                    new[] { "PLC", string.Empty, "Tracked", "20", "FC", "SCL", "Siemens.Engineering.SW.Blocks.FC", exportedPath, "unsupported-language", "exported-source" },
+                    new[] { "PLC", string.Empty, "Main", "1", "OB", "LAD", "Siemens.Engineering.SW.Blocks.OB", inventoryPath, "unsupported-language", "inventory-only-unsupported" },
+                    new[] { "PLC", string.Empty, "Legacy", "2", "FC", "LAD", "Siemens.Engineering.SW.Blocks.FC", legacyPath, "unsupported-language", string.Empty }
+                });
+
+            List<CloneBlockRecord> records = LoadCloneBlockManifest(cloneDir, rootDir);
+            AssertTrue(records.Any(x => EqualsIgnoreCase(x.Name, "Tracked") && EqualsIgnoreCase(x.Provenance, "tracked-baseline")), "editing mutable Status must not erase explicit exported-source provenance");
+            AssertTrue(!records.Any(x => EqualsIgnoreCase(x.Name, "Main")), "valid inventory-only-unsupported proof must not claim a source baseline");
+            AssertTrue(records.Any(x => EqualsIgnoreCase(x.Name, "Legacy") && EqualsIgnoreCase(x.Provenance, "unknown-orphaned")), "legacy unsupported rows without durable origin must fail closed as unknown-orphaned");
+
+            CloneBlockRecord renamedVisual = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC", Name = "Renamed_Visual", Number = "99", NumberSpace = "FC", ProgrammingLanguage = "LAD",
+                TypeName = "Siemens.Engineering.SW.Blocks.FC", ExportStatus = "unsupported-language", RelativePath = "99_Renamed_Visual.lad",
+                ClonePath = Path.Combine(rootDir, "99_Renamed_Visual.lad")
+            };
+            List<CloneDiffRecord> diffs = BuildCloneBlockDiffs(records, new List<CloneBlockRecord> { renamedVisual });
+            AssertTrue(BlockingSourceBlockedDiffCount(diffs) > 0, "durable exported or unknown legacy provenance must block a later renamed and renumbered visual block");
+        }
+
+        private static void SelfTestCloneCommandPrevalidationNoMutation(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            WriteTextFile(Path.Combine(cloneDir, "_root", "sentinel.scl"), "sentinel\n");
+            WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "valid-existing-marker\n");
+            WriteTextFile(Path.Combine(cloneDir, "block-groups.csv"), "existing-groups\n");
+            string before = DirectoryTreeFingerprint(cloneDir);
+
+            InventorySnapshot multi = CreateSelfTestApplySnapshot();
+            multi.Devices.Clear();
+            multi.Devices.Add(new DeviceRecord { Kind = "Software", Path = "PLC_A", SoftwareType = "Siemens.Engineering.SW.PlcSoftware", Object = new object() });
+            multi.Devices.Add(new DeviceRecord { Kind = "Software", Path = "PLC_B", SoftwareType = "Siemens.Engineering.SW.PlcSoftware", Object = new object() });
+            bool initRejected = false;
+            bool checkRejected = false;
+            try
+            {
+                InitializeProjectClone(multi, cloneDir, new Options());
+            }
+            catch (InvalidOperationException)
+            {
+                initRejected = true;
+            }
+            AssertEqual(before, DirectoryTreeFingerprint(cloneDir), "mis-scoped multi-PLC init-clone must not change any existing workspace file or marker");
+
+            try
+            {
+                CheckProjectClone(multi, cloneDir);
+            }
+            catch (InvalidOperationException)
+            {
+                checkRejected = true;
+            }
+            AssertTrue(initRejected && checkRejected, "init-clone and check-clone must reject ambiguous multi-PLC selection");
+            AssertEqual(before, DirectoryTreeFingerprint(cloneDir), "mis-scoped multi-PLC check-clone must not invalidate the existing marker or create compare/staging artifacts");
+        }
+
+        private static void SelfTestSyncCloneTransactionSuccess(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string compareDir = Path.Combine(cloneDir, "_compare", "current-transaction");
+            string compareRoot = Path.Combine(compareDir, "_root");
+            string clonePath = Path.Combine(rootDir, "10_FB.scl");
+            string currentPath = Path.Combine(compareRoot, "10_FB.scl");
+            WriteTextFile(clonePath, "FUNCTION_BLOCK \"FB\"\nBEGIN\n    #Value := 1;\nEND_FUNCTION_BLOCK\n");
+            string oldContent = File.ReadAllText(clonePath, Encoding.UTF8);
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"FB\"\nBEGIN\n    #Value := 2;\nEND_FUNCTION_BLOCK\n");
+            WriteCsv(
+                Path.Combine(cloneDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "TypeName", "FilePath", "Status", "SourceOrigin" },
+                new[] { new[] { "PLC", string.Empty, "FB", "10", "FB", "SCL", "Siemens.Engineering.SW.Blocks.FB", clonePath, "ok", "exported-source" } });
+            WriteCsv(Path.Combine(cloneDir, "block-groups.csv"), new[] { "SoftwarePath", "GroupPath", "Name", "Directory" }, new string[0][]);
+            WriteTextFile(Path.Combine(cloneDir, "_metadata", "sentinel.txt"), "old metadata\n");
+            string checkRunId = Guid.NewGuid().ToString("N");
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number", "ProgrammingLanguage", "TypeName", "CloneSoftwarePath", "CloneName", "CloneNumberSpace", "CloneNumber", "ClonePath", "CloneProvenance", "CurrentSoftwarePath", "CurrentName", "CurrentNumberSpace", "CurrentNumber", "CurrentPath", "CurrentSourceSha256" },
+                new[]
+                {
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC", "changed", "FB", "FB", "10", "SCL", "Siemens.Engineering.SW.Blocks.FB", "PLC", "FB", "FB", "10", clonePath, "tracked-baseline", "PLC", "FB", "FB", "10", currentPath, ComputeFileSha256(currentPath) }
+                });
+            WriteCsv(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName), new[] { "CheckSchemaVersion", "CheckRunId", "Severity" }, new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 1, 0);
+
+            SyncProjectClone(cloneDir);
+
+            AssertEqual(File.ReadAllText(currentPath, Encoding.UTF8), File.ReadAllText(clonePath, Encoding.UTF8), "successful sync transaction must publish the staged source");
+            Dictionary<string, string> manifest = ReadCsv(Path.Combine(cloneDir, "plc-blocks.csv")).Single();
+            AssertEqual("exported-source", GetCsvValue(manifest, "SourceOrigin"), "successful sync must publish durable source origin");
+            AssertEqual(ComputeFileSha256(clonePath), GetCsvValue(manifest, "SourceSha256"), "successful sync manifest hash must describe the installed source");
+            AssertEqual("4", File.ReadAllText(Path.Combine(cloneDir, "_metadata", "schema-version.txt"), Encoding.UTF8).Trim(), "successful sync must publish metadata schema 4");
+            AssertTrue(!File.Exists(Path.Combine(cloneDir, CloneCheckBundleFileName)), "successful sync must invalidate the consumed authorization bundle");
+            AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-staging")), "successful sync must remove committed staging");
+            string backup = Directory.GetDirectories(Path.Combine(cloneDir, "_sync-backups"), "sync-*", SearchOption.TopDirectoryOnly).Single();
+            AssertEqual(oldContent, File.ReadAllText(Path.Combine(backup, "_root", "10_FB.scl"), Encoding.UTF8), "successful sync must retain the previous source in its transaction backup");
+        }
+
+        private static void SelfTestSyncCloneTransactionFailure(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string compareDir = Path.Combine(cloneDir, "_compare", "current-transaction");
+            string compareRoot = Path.Combine(compareDir, "_root");
+            string parentConflict = Path.Combine(rootDir, "conflict");
+            string destinationPath = Path.Combine(parentConflict, "10_FB.scl");
+            string currentPath = Path.Combine(compareRoot, "conflict", "10_FB.scl");
+            WriteTextFile(parentConflict, "this file prevents creating a child path\n");
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"FB\"\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(Path.Combine(cloneDir, "plc-blocks.csv"), "manifest-before\n");
+            WriteTextFile(Path.Combine(cloneDir, "block-groups.csv"), "groups-before\n");
+            WriteTextFile(Path.Combine(cloneDir, "_metadata", "sentinel.txt"), "metadata-before\n");
+            string checkRunId = Guid.NewGuid().ToString("N");
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number", "CloneSoftwarePath", "CloneName", "CloneNumberSpace", "CloneNumber", "ClonePath", "CloneProvenance", "CurrentSoftwarePath", "CurrentName", "CurrentNumberSpace", "CurrentNumber", "CurrentPath", "CurrentSourceSha256" },
+                new[]
+                {
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC", "changed", "FB", "FB", "10", "PLC", "FB", "FB", "10", destinationPath, "tracked-baseline", "PLC", "FB", "FB", "10", currentPath, ComputeFileSha256(currentPath) }
+                });
+            WriteCsv(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName), new[] { "CheckSchemaVersion", "CheckRunId", "Severity" }, new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 1, 0);
+
+            string rootBefore = DirectoryTreeFingerprint(rootDir);
+            string manifestBefore = File.ReadAllText(Path.Combine(cloneDir, "plc-blocks.csv"), Encoding.UTF8);
+            string groupsBefore = File.ReadAllText(Path.Combine(cloneDir, "block-groups.csv"), Encoding.UTF8);
+            string metadataBefore = DirectoryTreeFingerprint(Path.Combine(cloneDir, "_metadata"));
+            string markerBefore = ComputeFileSha256(Path.Combine(cloneDir, CloneCheckBundleFileName));
+            bool failed = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidOperationException ex)
+            {
+                failed = ex.Message.IndexOf("original _root", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            AssertTrue(failed, "a per-row staging failure must make sync-clone return non-zero");
+            AssertEqual(rootBefore, DirectoryTreeFingerprint(rootDir), "failed sync must leave the original _root byte-for-byte unchanged");
+            AssertEqual(manifestBefore, File.ReadAllText(Path.Combine(cloneDir, "plc-blocks.csv"), Encoding.UTF8), "failed sync must not publish a new block manifest");
+            AssertEqual(groupsBefore, File.ReadAllText(Path.Combine(cloneDir, "block-groups.csv"), Encoding.UTF8), "failed sync must not publish a new group manifest");
+            AssertEqual(metadataBefore, DirectoryTreeFingerprint(Path.Combine(cloneDir, "_metadata")), "failed sync must not publish new metadata");
+            AssertEqual(markerBefore, ComputeFileSha256(Path.Combine(cloneDir, CloneCheckBundleFileName)), "failed sync must preserve the valid authorization bundle");
+            AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-backups")), "failed staging must not create a commit backup because original data was never touched");
+        }
+
+        private static CloneBlockRecord CreateSelfTestCurrentCloneRecord(CloneBlockRecord clone, string currentPath)
+        {
+            return new CloneBlockRecord
+            {
+                SoftwarePath = clone.SoftwarePath,
+                GroupPath = clone.GroupPath,
+                GroupPathDisplay = clone.GroupPathDisplay,
+                Name = clone.Name,
+                Number = clone.Number,
+                NumberSpace = clone.NumberSpace,
+                ProgrammingLanguage = clone.ProgrammingLanguage,
+                BlockType = clone.BlockType,
+                TypeName = clone.TypeName,
+                SourceTypeName = clone.SourceTypeName,
+                RelativePath = clone.RelativePath,
+                ClonePath = clone.ClonePath,
+                CurrentPath = currentPath,
+                ExportStatus = "ok",
+                SourceSha256 = ComputeFileSha256(currentPath),
+                NormalizedSourceSha256 = ComputeNormalizedTextSha256(currentPath),
+                TiaObjectId = "self-test-live-object",
+                TiaObjectIdStatus = "available"
+            };
+        }
+
+        private static ExplicitNewPromotionReceipt CreateSelfTestPromotionReceipt(CloneBlockRecord clone, CloneBlockRecord current, string sourcePath, string checkRunId)
+        {
+            return new ExplicitNewPromotionReceipt
+            {
+                ReceiptId = Guid.NewGuid().ToString("N"),
+                CheckRunId = checkRunId,
+                SoftwarePath = clone.SoftwarePath,
+                TargetGroupPath = clone.GroupPath,
+                TargetName = clone.Name,
+                TargetNumberSpace = clone.NumberSpace,
+                TargetNumber = clone.Number,
+                ProgrammingLanguage = clone.ProgrammingLanguage,
+                SourcePath = sourcePath,
+                SourceNormalizedSha256 = ComputeNormalizedTextSha256(sourcePath),
+                LiveTiaObjectId = current.TiaObjectId,
+                LiveTiaObjectIdStatus = current.TiaObjectIdStatus
+            };
         }
 
         private static void SelfTestApplyCloneMultiPlcFailClosed(string caseDir)
@@ -24671,6 +25806,21 @@ namespace OpennessLLM
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             File.WriteAllText(path, text, new UTF8Encoding(false));
+        }
+
+        private static string DirectoryTreeFingerprint(string directory)
+        {
+            if (!Directory.Exists(directory))
+            {
+                return "<missing>";
+            }
+
+            List<string> entries = new List<string>();
+            entries.AddRange(Directory.GetDirectories(directory, "*", SearchOption.AllDirectories)
+                .Select(x => "D|" + MakeRelativePath(directory, x)));
+            entries.AddRange(Directory.GetFiles(directory, "*", SearchOption.AllDirectories)
+                .Select(x => "F|" + MakeRelativePath(directory, x) + "|" + ComputeFileSha256(x)));
+            return string.Join("\n", entries.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray());
         }
 
         private static void AssertTrue(bool condition, string message)
@@ -26708,6 +27858,14 @@ namespace OpennessLLM
             public bool WillGenerateSource;
             public bool WillRename;
             public bool WillDelete;
+            public bool ConsumesManifestRow;
+            public string ManifestSoftwarePath;
+            public string ManifestGroupPath;
+            public string ManifestName;
+            public string ManifestNumberSpace;
+            public string ManifestNumber;
+            public string ManifestFilePath;
+            public string CloneProvenance;
             public bool LiveSourceDriftChecked;
             public string LiveSourceStatus;
             public string LiveSourcePath;
@@ -26850,6 +28008,29 @@ namespace OpennessLLM
             // "explicit-new-local-source" only when a loose source carries the
             // exact sidecar opt-in, otherwise "unknown-orphaned" (fail closed).
             public string Provenance;
+        }
+
+        private sealed class ExplicitNewPromotionReceipt
+        {
+            public string ReceiptId;
+            public string CheckRunId;
+            public string SoftwarePath;
+            public string TargetGroupPath;
+            public string TargetName;
+            public string TargetNumberSpace;
+            public string TargetNumber;
+            public string ProgrammingLanguage;
+            public string SourcePath;
+            public string SourceNormalizedSha256;
+            public string LiveTiaObjectId;
+            public string LiveTiaObjectIdStatus;
+        }
+
+        private sealed class ExplicitNewPromotionCandidate
+        {
+            public CloneBlockRecord Clone;
+            public CloneBlockRecord Current;
+            public ExplicitNewPromotionReceipt Receipt;
         }
 
         private sealed class CloneDiffRecord

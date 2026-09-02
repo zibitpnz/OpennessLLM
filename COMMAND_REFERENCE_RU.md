@@ -479,6 +479,11 @@ duplicate/move screen items. Если операция не поддержана
 Команда не открывает TIA Portal. Ее нужно запускать только после осознанного
 `check-clone`, когда текущее состояние проекта считается правильным baseline.
 
+`sync-clone` сначала создаёт полный кандидат `_root`, manifests и metadata в
+`_sync-staging`. Пока все операции не завершены, рабочий baseline не меняется.
+При ошибке команда возвращает non-zero и сохраняет текущий bundle; commit
+использует `_sync-backups` и rollback при неполной публикации.
+
 Начиная с `0.12.2`, если `check-clone` нашел новый блок, созданный в TIA Portal,
 `sync-clone` сохраняет для него `SoftwarePath` и в `plc-blocks.csv`, и в
 `CLONE_PROJECT\_metadata\blocks.jsonl`. Это важно для последующих lookup/gates и
@@ -673,6 +678,8 @@ unsupported
 Текущий bundle schema 2 привязан к normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
 Bundle от другого проекта или schema 1 отклоняется до построения apply plan.
+Проверка единственного PLC и `ExternalSourceGroup` выполняется до invalidation
+существующего bundle и до создания compare/staging файлов.
 
 ### apply-clone
 
@@ -683,6 +690,14 @@ Bundle от другого проекта или schema 1 отклоняется
 требует, чтобы открытый проект содержал ровно один `PlcSoftware`; multi-PLC
 проект сейчас отклоняется fail closed. `init-clone`/`check-clone` можно
 ограничить одним PLC через `--software-path`.
+
+Delete preflight различает TIA-only блок и tracked блок с удалённым clone
+source. Для tracked deletion исходная manifest identity и ровно одна строка
+проверяются до первой TIA-записи; TIA-only deletion не требует строку manifest.
+Pending `explicit-new-local-source` разрешает только `CreateBlock`. Он становится
+tracked лишь по receipt успешного создания и совпадению экспортированного live
+source по language/normalized hash; существующий одноимённый блок не принимается
+автоматически.
 
 Dry-run:
 

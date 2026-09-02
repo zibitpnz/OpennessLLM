@@ -303,10 +303,13 @@ CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
 `unknown-orphaned` и при неоднозначности source-blocker gate завершится fail
 closed.
 
-`explicit-new-local-source` используется один раз. При первом точном совпадении
-с live TIA блоком инструмент меняет sidecar origin на `tracked-baseline` и
-добавляет строку в `plc-blocks.csv`. Не возвращайте marker обратно вручную:
-после применения блок уже является tracked baseline.
+`explicit-new-local-source` используется один раз. Обычный `check-clone` не
+промоутит source только из-за совпадения имени/номера. После успешного
+`CreateBlock` инструмент создаёт receipt, повторно экспортирует live source и
+требует совпадения language и normalized hash. Только затем восстанавливаемая
+транзакция меняет sidecar origin на `tracked-baseline` и публикует строку в
+`plc-blocks.csv`. Не возвращайте marker обратно вручную: после применения блок
+уже является tracked baseline.
 
 Шаг 4. Dry-run и apply:
 

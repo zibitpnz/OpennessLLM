@@ -141,6 +141,10 @@ Accept the latest `check-clone` result into `CLONE_PROJECT`:
 When `check-clone` reports blocks added directly in TIA Portal, `sync-clone`
 accepts them into both the human CSV view and machine metadata, including
 `SoftwarePath` in `plc-blocks.csv` and `_metadata\blocks.jsonl`.
+The command builds the complete replacement `_root`, manifests, and metadata
+under `_sync-staging` first. Any file/group operation error returns non-zero and
+leaves the current baseline plus its authorization bundle unchanged. Commit
+uses `_sync-backups` and rolls back installed outputs if publication fails.
 
 Apply changed clone source files back into TIA Portal through External Sources:
 
@@ -166,7 +170,11 @@ DB handling conservative: the referenced FB must exist, changing
 sources.
 
 Clone metadata also tracks `AutoNumber`, `NumberMode`, `NumberSpace`, selected
-SDK attributes, and SHA-256 hashes of source files. `apply-clone` refuses to
+SDK attributes, SHA-256 hashes, and durable `SourceOrigin`. The latter records
+whether a source was actually exported (`exported-source`) or was only an
+unsupported-language inventory row (`inventory-only-unsupported`); legacy or
+contradictory missing-source rows fail closed as `unknown-orphaned`.
+`apply-clone` refuses to
 write if a clone source file changed after the latest `check-clone`; run
 `check-clone` again before applying.
 
@@ -174,7 +182,7 @@ write if a clone source file changed after the latest `check-clone`; run
 `CLONE_PROJECT\_metadata`: `clone-manifest.json`, `blocks.jsonl`,
 `groups.jsonl`, and `schema-version.txt`. The CSV files remain the convenient
 human-readable view; `_metadata` is the versioned machine view for future
-automation.
+automation. The current metadata schema is 4.
 
 Fast PLC block lookup from the local clone metadata:
 
@@ -253,12 +261,17 @@ input, set `"sourceOrigin":"explicit-new-local-source"` in its sidecar; this is
 the only loose-source origin that receives the new-block exemption from the
 ambiguous visual-block gate. A nonempty `softwarePath` in the same valid flat
 JSON sidecar is required; malformed/nested metadata or invalid JSON escapes
-remain `unknown-orphaned`. This origin is one-shot: the first exact live TIA
-match rewrites the sidecar origin to `tracked-baseline` and atomically adds the
-source to `plc-blocks.csv`. If that manifest row is later lost, the consumed
+remain `unknown-orphaned`. This origin is one-shot: only a successful
+`CreateBlock` operation can issue a promotion receipt. The receipt binds the
+check run, selected PLC, target identity, source hash, language, and resulting
+live object; promotion additionally requires an exportable live source with the
+same normalized content. A pre-existing same-identity block is not adopted.
+The recoverable `_manifest-publish` transaction rewrites the sidecar origin to
+`tracked-baseline` and publishes the manifest as one transition. If that row is later lost, the consumed
 sidecar becomes `unknown-orphaned` instead of receiving the new-block exemption
-again. A successfully completed clone-side deletion consumes its stale manifest
-row before the post-apply check.
+again. Delete preflight distinguishes an untracked TIA-only block from a tracked
+missing-source block and proves the exact manifest row to consume before any
+TIA write; only the latter row is removed after a successful deletion.
 
 When the project is already open in TIA Portal, use `--attach`:
 

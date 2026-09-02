@@ -16,17 +16,29 @@ All notable changes to OpennessLLM are recorded in this file.
   fails closed before plan construction when the open project contains more
   than one `PlcSoftware`. `init-clone` / `check-clone` likewise require one
   selected PLC, with `--software-path` used to scope read-only clone work.
-- `explicit-new-local-source` is now a one-shot origin. The first exact live TIA
-  match consumes the sidecar marker and atomically promotes the source into
-  `plc-blocks.csv` as `tracked-baseline`; later manifest loss yields conservative
-  `unknown-orphaned` provenance instead of resurrecting the exemption.
-- A successfully completed `DeleteBlock` consumes exactly one matching tracked
-  manifest row before the post-apply check. An unrelated current-only visual
-  block can no longer turn that completed deletion into a false after-write
-  blocker and leave a valid result unsavable.
+- `explicit-new-local-source` is now a one-shot origin promoted only by a
+  successful `CreateBlock` receipt bound to the check run, selected PLC, target
+  identity, source hash/language, and resulting live object. Promotion also
+  requires an exportable live source with equal normalized content; metadata-only
+  adoption of a pre-existing block is forbidden. The one-to-one promotion batch
+  and sidecar/manifest publication use a recoverable `_manifest-publish`
+  transaction. Later manifest loss yields conservative `unknown-orphaned`
+  provenance instead of resurrecting the exemption.
+- Delete preflight now distinguishes a TIA-only block from a tracked block whose
+  clone source is missing. The latter carries its immutable clone-side manifest
+  identity and proves exactly one row before any TIA write; the former consumes
+  none. A successfully completed tracked deletion removes only its proven row
+  before the post-apply check.
 - `sync-clone` no longer guesses the newest `_compare` directory; it consumes
   the directory bound to the validated bundle and verifies current-source
-  hashes before copying.
+  hashes before copying. It stages a complete replacement `_root`, manifests,
+  and metadata, publishes only after every operation succeeds, rolls back a
+  failed commit from `_sync-backups`, and returns non-zero without changing the
+  current baseline/bundle on any staging error.
+- `plc-blocks.csv` and metadata schema 4 record durable `SourceOrigin` as
+  `exported-source` or `inventory-only-unsupported`. A mutable `Status` edit no
+  longer erases tracked history; legacy/contradictory missing-source rows become
+  fail-closed `unknown-orphaned` evidence.
 - Source-blocker write classification is now a single shared helper
   (`SourceBlockedStatusBlocksWrite` / `BlockingSourceBlockedRows` /
   `BlockingSourceBlockerCount`) used by every pre-write gate, the after-write
@@ -73,7 +85,7 @@ All notable changes to OpennessLLM are recorded in this file.
   overlap every live block number space for conservative source-blocker
   classification.
 - Successful `check-clone` removes its empty staging parent; interrupted
-  `_check-publish` content is recognized and backed up by
+  `_check-publish`, `_manifest-publish`, and `_sync-staging` content is recognized and backed up by
   `init-workspace --force` as generated workspace state.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
@@ -98,10 +110,16 @@ All notable changes to OpennessLLM are recorded in this file.
 - Added full transition regressions for post-delete classification,
   explicit-new promotion plus later manifest loss, multi-PLC apply rejection,
   and project-A bundle/project-B apply rejection.
+- Added command-path regressions for live-only versus tracked renamed/moved
+  deletion, promotion receipt/content checks and duplicate-batch recovery,
+  pre-mutation multi-PLC rejection, durable manifest origin, and transactional
+  sync failure.
+- `build.ps1` now propagates the C# compiler exit code so CI cannot report a
+  stale executable as a successful build.
 - Documentation now states explicitly that `apply-clone` does not compile;
   interface regressions are detected only by a subsequent external
   `compile-all --apply` in the full workflow.
-- Verification result: `self-test` passed `40/40`.
+- Verification result: `self-test` passed `46/46`.
 
 ## 0.12.3 - 2026-08-27
 

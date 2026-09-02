@@ -325,17 +325,29 @@ multi-PLC проекте read-only clone нужно ограничить чер�
 `PlcSoftware`, даже при scoped bundle: это исключает выбор write-target по
 порядку enumeration.
 
-`explicit-new-local-source` — одноразовое состояние. При первом точном live TIA
-match sidecar безопасно переписывается в `tracked-baseline`, после чего строка
-атомарно публикуется в `plc-blocks.csv`. Если manifest позже потерян, stale
-sidecar уже не возвращает исключение, а даёт `unknown-orphaned`. Успешный
-`DeleteBlock` до post-check удаляет ровно одну соответствующую tracked-строку
-manifest, поэтому unrelated current-only visual block не может создать ложный
-after-write blocker только из-за завершённого удаления.
+`explicit-new-local-source` — одноразовое состояние. Совпадение metadata само
+по себе не расходует его: нужен receipt успешного `CreateBlock`, связанный с
+check run, выбранным PLC, target identity, source hash/language и live object.
+Экспортированный live source обязан совпасть по языку и normalized hash.
+Дубликаты в batch отклоняются до sidecar mutation; sidecar и manifest меняются
+через восстанавливаемый `_manifest-publish`. Если manifest позже потерян,
+consumed sidecar даёт `unknown-orphaned`.
+
+Для `DeleteBlock` preflight заранее различает live-only блок (manifest row не
+нужен) и tracked missing-source блок (сохраняется immutable clone identity и
+должна существовать ровно одна строка manifest). Поэтому ошибка количества или
+identity обнаруживается до TIA write, а post-check расходует только доказанную
+tracked-строку.
+
+`SourceOrigin` в `plc-blocks.csv` независимо от mutable `Status` фиксирует
+`exported-source` либо `inventory-only-unsupported`. Legacy и противоречивые
+missing-source строки считаются `unknown-orphaned`.
 
 `apply-clone` и `sync-clone` используют одну и ту же cross-report проверку.
-`sync-clone` выполняет её до создания backup, изменения source-файлов,
-manifest или sync report. Пустой, отсутствующий или неизвестный `Severity`, а
+`sync-clone` выполняет её до изменения source-файлов или manifest. Затем вся
+новая версия `_root`, manifests и metadata строится в `_sync-staging`. Любая
+ошибка возвращает non-zero и не публикует baseline; commit использует
+`_sync-backups` и rollback. Пустой, отсутствующий или неизвестный `Severity`, а
 также malformed строка dedicated report блокируют операцию. Неблокирующим
 считается только явный `Severity=warning` для
 `source-blocked-current-only`.

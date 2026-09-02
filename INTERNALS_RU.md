@@ -417,6 +417,10 @@ write workflow. Он получает export/source blocker status.
 9. `apply-clone` / `sync-clone` принимают только полностью проверенный bundle.
 ```
 
+До invalidation старого bundle и создания `_compare` команда проверяет, что
+выбран ровно один `PlcSoftware` и у него доступен `ExternalSourceGroup`. Ошибка
+scope поэтому не меняет существующий workspace.
+
 Типовые статусы:
 
 ```text
@@ -449,6 +453,13 @@ source files under CLONE_PROJECT\_root.
 project-side added block, `sync-clone` должен перенести в baseline полный
 identity record, включая `SoftwarePath`. Начиная с `0.12.2`, это поле
 сохраняется и в `plc-blocks.csv`, и в `_metadata\blocks.jsonl`.
+
+Файловые операции выполняются не над рабочим `_root`, а над полной копией в
+`_sync-staging`. Там же заранее строятся новые manifests и metadata. При любой
+ошибке staging удаляется, команда возвращает non-zero, а старые `_root`,
+manifests, metadata и bundle остаются неизменными. Commit сначала переносит
+старое состояние в `_sync-backups`; если установка нового состояния не
+завершилась, выполняется rollback.
 
 Это важно для:
 
@@ -509,7 +520,8 @@ Pipeline:
 10. Создать backup, если требуется.
 11. Проверить live source drift для изменяемых blocks.
 12. Применить операции через TIA SDK / External Sources.
-13. Зафиксировать lifecycle metadata: consume explicit-new и завершённые deletes.
+13. Зафиксировать lifecycle metadata: consume explicit-new только по receipt
+    успешного CreateBlock и завершённые deletes только по preflight manifest receipt.
 14. Запустить post-check reports.
 15. Сохранить проект только при --save и accepted result.
 ```
@@ -568,9 +580,23 @@ sourceOrigin
 `softwarePath`. Malformed/nested sidecar, потеря или неполнота manifest не дают
 этого исключения; loose source также не наследует первый software path из manifest.
 
-Это one-shot provenance: первый точный live match переписывает origin в sidecar
-на `tracked-baseline` и атомарно добавляет manifest row. При последующей потере
+Это one-shot provenance: `check-clone` сам по совпадению metadata ничего не
+промоутит. Только успешный `CreateBlock` создаёт receipt с check run ID,
+SoftwarePath, target identity, source hash/language и live object identity.
+Экспортированный live source обязан совпасть по language и normalized hash.
+One-to-one batch затем через восстанавливаемый `_manifest-publish` переводит
+sidecar в `tracked-baseline` и публикует manifest. При последующей потере
 manifest такой source становится `unknown-orphaned`, а не снова explicit-new.
+
+`plc-blocks.csv` содержит отдельный durable `SourceOrigin`:
+
+```text
+exported-source                source действительно экспортировался;
+inventory-only-unsupported     source никогда не создавался из-за языка.
+```
+
+Изменение одного mutable `Status` не стирает историю. Legacy или
+противоречивые missing-source строки становятся `unknown-orphaned`.
 
 Если sidecar отсутствует, numeric prefix filename может означать manual block
 number.
