@@ -37,7 +37,8 @@ All notable changes to OpennessLLM are recorded in this file.
   requires a nonempty sidecar `softwarePath`.
 - Safety-critical origin metadata is accepted only from a complete, valid flat
   JSON sidecar. Malformed/nested sidecars, invalid JSON escapes, and unescaped
-  control characters remain `unknown-orphaned`.
+  control characters remain `unknown-orphaned`; JSON literals and numbers use
+  their case-sensitive, leading-zero-safe standard grammar.
 - A structurally conflicting `added` + `removed` pair that may identify the
   same block (including an unscoped orphan paired with a scoped live block) now
   invalidates the evidence bundle before apply/sync mutation.

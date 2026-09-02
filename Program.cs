@@ -20725,7 +20725,7 @@ namespace OpennessLLM
                     }
 
                     string raw = trimmed.Substring(start, index - start).Trim();
-                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)$", RegexOptions.IgnoreCase))
+                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)$"))
                     {
                         throw new InvalidDataException(context + " contains a non-primitive or malformed value.");
                     }
@@ -23133,6 +23133,12 @@ namespace OpennessLLM
 
             WriteTextFile(sourcePath + ".meta.json", "{\"source\\Origin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}\n");
             AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "invalid JSON escape in a trusted key must not grant explicit-new provenance");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"flag\":TRUE}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "case-insensitive non-JSON literal must invalidate the entire provenance sidecar");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":01}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "non-JSON leading-zero number must invalidate the entire provenance sidecar");
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"}\n");
             CloneBlockRecord originWithoutScope = LoadCloneBlockManifest(cloneDir, rootDir)[0];
