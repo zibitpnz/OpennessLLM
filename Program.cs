@@ -20725,7 +20725,7 @@ namespace OpennessLLM
                     }
 
                     string raw = trimmed.Substring(start, index - start).Trim();
-                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)$"))
+                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$"))
                     {
                         throw new InvalidDataException(context + " contains a non-primitive or malformed value.");
                     }
@@ -23139,6 +23139,9 @@ namespace OpennessLLM
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":01}\n");
             AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "non-JSON leading-zero number must invalidate the entire provenance sidecar");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"extra\":1\u0661}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "Unicode decimal digits must not be accepted in a JSON number");
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"}\n");
             CloneBlockRecord originWithoutScope = LoadCloneBlockManifest(cloneDir, rootDir)[0];
