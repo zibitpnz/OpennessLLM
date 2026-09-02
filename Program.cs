@@ -6376,6 +6376,7 @@ namespace OpennessLLM
                 || EqualsIgnoreCase(name, "_inventory")
                 || EqualsIgnoreCase(name, "_compare")
                 || EqualsIgnoreCase(name, "_preflight")
+                || EqualsIgnoreCase(name, "_check-publish")
                 || EqualsIgnoreCase(name, "_sync-backups")
                 || EqualsIgnoreCase(name, "_hmi")
                 || EqualsIgnoreCase(name, "_hmi_metadata")
@@ -13578,7 +13579,8 @@ namespace OpennessLLM
             List<CloneDiffRecord> blockDiffs = BuildCloneBlockDiffs(cloneBlocks, currentBlocks);
             List<CloneGroupDiffRecord> groupDiffs = BuildCloneGroupDiffs(outDir, snapshot);
 
-            string publishDir = Path.Combine(outDir, "_check-publish", "run-" + checkRunId);
+            string publishRoot = Path.Combine(outDir, "_check-publish");
+            string publishDir = Path.Combine(publishRoot, "run-" + checkRunId);
             Directory.CreateDirectory(publishDir);
             string stagedBlockReportPath = Path.Combine(publishDir, CloneCheckBlockFileName);
             WriteCsv(stagedBlockReportPath,
@@ -13659,6 +13661,10 @@ namespace OpennessLLM
             try
             {
                 Directory.Delete(publishDir, true);
+                if (Directory.Exists(publishRoot) && !Directory.EnumerateFileSystemEntries(publishRoot).Any())
+                {
+                    Directory.Delete(publishRoot, false);
+                }
             }
             catch
             {
@@ -14527,7 +14533,8 @@ namespace OpennessLLM
         // BOTH hold:
         //   1. no "removed" clone row could be the same block by number or name, AND
         //   2. no "removed" clone row without the exact durable
-        //      explicit-new-local-source origin shares its block number space.
+        //      explicit-new-local-source origin shares or has unknown block
+        //      number space.
         // (2) fails closed on the ambiguous case where a tracked block changed
         // both name and number before conversion, or where manifest provenance
         // was lost. Only an exact sidecar sourceOrigin opt-in proves a source is
@@ -14574,6 +14581,21 @@ namespace OpennessLLM
             return string.IsNullOrWhiteSpace(first)
                 || string.IsNullOrWhiteSpace(second)
                 || EqualsIgnoreCase(first, second);
+        }
+
+        private static bool NumberSpacesCouldOverlap(string first, string second)
+        {
+            return !IsKnownBlockNumberSpace(first)
+                || !IsKnownBlockNumberSpace(second)
+                || EqualsIgnoreCase(first, second);
+        }
+
+        private static bool IsKnownBlockNumberSpace(string value)
+        {
+            return EqualsIgnoreCase(value, "OB")
+                || EqualsIgnoreCase(value, "FB")
+                || EqualsIgnoreCase(value, "FC")
+                || EqualsIgnoreCase(value, "DB");
         }
 
         private static bool IsInformationalSourceBlockedCandidate(string status)
@@ -14635,8 +14657,7 @@ namespace OpennessLLM
 
                     if (!r.ExplicitNewLocalSource
                         && SoftwarePathsCouldOverlap(liveKey.SoftwarePath, r.Key.SoftwarePath)
-                        && liveKey.NumberSpace.Length > 0
-                        && EqualsIgnoreCase(liveKey.NumberSpace, r.Key.NumberSpace))
+                        && NumberSpacesCouldOverlap(liveKey.NumberSpace, r.Key.NumberSpace))
                     {
                         return true;
                     }
@@ -14807,7 +14828,7 @@ namespace OpennessLLM
                     .FirstOrDefault();
             }
 
-            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone bundle contains " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a tracked/unknown-orphaned block of the same software and number space went missing while an unmatched visual block is present; or dedicated source-blocker evidence is malformed. Resolve the TIA/clone conflict or regenerate the complete bundle with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
+            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone bundle contains " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a tracked/unknown-orphaned block of overlapping software and known-or-unknown number space went missing while an unmatched visual block is present; or dedicated source-blocker evidence is malformed. Resolve the TIA/clone conflict or regenerate the complete bundle with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
         }
 
         private static void WriteStatusCounts(StreamWriter writer, string label, IEnumerable<string> statuses)
@@ -22899,6 +22920,20 @@ namespace OpennessLLM
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "BarBlock", string.Empty, "PLC_B"),
             };
             AssertTrue(SourceBlockerGateThrows("apply-clone", missingSoftware), "missing SoftwarePath must fail closed because software scope is ambiguous");
+
+            List<Dictionary<string, string>> missingNumberSpace = new List<Dictionary<string, string>>
+            {
+                SourceBlockerTestRow("removed", string.Empty, "20", "LostDeclaration", "unknown-orphaned", "PLC"),
+                SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "RenamedVisual", string.Empty, "PLC"),
+            };
+            AssertTrue(SourceBlockerGateThrows("apply-clone", missingNumberSpace), "a missing removed NumberSpace must overlap every live number space and fail closed");
+
+            List<Dictionary<string, string>> unrecognizedNumberSpace = new List<Dictionary<string, string>>
+            {
+                SourceBlockerTestRow("removed", "SCL", "20", "LostDeclaration", "unknown-orphaned", "PLC"),
+                SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "RenamedVisual", string.Empty, "PLC"),
+            };
+            AssertTrue(SourceBlockerGateThrows("sync-clone", unrecognizedNumberSpace), "an unrecognized removed NumberSpace must overlap every live number space and fail closed");
         }
 
         private static void SelfTestSourceBlockerReportCrossCheck(string caseDir)
@@ -23198,6 +23233,14 @@ namespace OpennessLLM
 
             AssertTrue(crossSoftwarePathCollisionRejected, "an added and removed row that share one physical _root path must fail closed even across different SoftwarePath values");
             AssertTrue(File.Exists(clonePath), "cross-software physical path collision must be rejected before sync mutation");
+
+            string reinitWorkspace = Path.Combine(caseDir, "REINIT_WORKSPACE");
+            string staleStagingFile = Path.Combine(reinitWorkspace, "_check-publish", "run-stale", "staged.tmp");
+            WriteTextFile(staleStagingFile, "interrupted staging\n");
+            AssertTrue(IsWorkspaceGeneratedArtifactName("_check-publish"), "check-clone staging parent must be classified as a generated workspace artifact");
+            string initBackup = BackupWorkspaceGeneratedArtifacts(reinitWorkspace);
+            AssertTrue(!Directory.Exists(Path.Combine(reinitWorkspace, "_check-publish")), "init-workspace backup must remove stale check-clone staging from the active workspace");
+            AssertTrue(File.Exists(Path.Combine(initBackup, "_check-publish", "run-stale", "staged.tmp")), "init-workspace backup must preserve stale check-clone staging for recovery");
         }
 
         private static void SelfTestCloneSourceOriginProvenance(string caseDir)

@@ -22,7 +22,7 @@ All notable changes to OpennessLLM are recorded in this file.
   `source-blocked-current-only` **and** (a) no `removed` clone row could be the
   same block by number or name, **and** (b) no `removed` clone row without the
   exact durable `explicit-new-local-source` sidecar origin shares its block
-  number space. `CloneProvenance` is now `tracked-baseline`,
+  number space or has an unknown number space. `CloneProvenance` is now `tracked-baseline`,
   `explicit-new-local-source`, or fail-closed `unknown-orphaned`. (b) fails
   closed on a tracked block that
   changed both name and number before conversion. `source-blocked-language-converted`,
@@ -44,6 +44,12 @@ All notable changes to OpennessLLM are recorded in this file.
   invalidates the evidence bundle before apply/sync mutation. Distinct report
   rows that touch the same physical `_root` path are also rejected regardless
   of `SoftwarePath`.
+- Missing or unrecognized number spaces on tracked/unknown removed sources now
+  overlap every live block number space for conservative source-blocker
+  classification.
+- Successful `check-clone` removes its empty staging parent; interrupted
+  `_check-publish` content is recognized and backed up by
+  `init-workspace --force` as generated workspace state.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
   reports without the column fail closed), after bundle integrity validation.
