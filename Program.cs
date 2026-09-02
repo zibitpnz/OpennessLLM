@@ -13980,6 +13980,11 @@ namespace OpennessLLM
                     return "Current TIA block language '" + current.ProgrammingLanguage + "' cannot be exported as clone source. Convert this block to STL/SCL in TIA before adding it to the source clone workflow.";
                 }
 
+                if (EqualsIgnoreCase(clone.ProgrammingLanguage, current.ProgrammingLanguage))
+                {
+                    return "Current TIA block is represented by tracked clone source metadata, but language '" + current.ProgrammingLanguage + "' cannot be exported safely. Convert it to STL/SCL in TIA, compile, and run check-clone again.";
+                }
+
                 return "Current TIA block matches clone block by identity, but the language changed from '" + clone.ProgrammingLanguage + "' in clone to unsupported '" + current.ProgrammingLanguage + "' in TIA. Convert it back to STL/SCL in TIA, compile, and run check-clone again.";
             }
 
@@ -20660,6 +20665,19 @@ namespace OpennessLLM
                         : Path.Combine(SafeFilePath(groupPath), SafeFileName(fileName));
                     string clonePath = Path.Combine(rootDir, relativePath);
                     bool cloneFileExists = File.Exists(clonePath);
+                    string manifestStatus = GetCsvValue(row, "Status");
+                    if (!cloneFileExists && EqualsIgnoreCase(manifestStatus, "unsupported-language"))
+                    {
+                        // init-clone inventories pre-existing LAD/FBD/GRAPH
+                        // blocks even though no source clone was ever produced.
+                        // Such a row proves inventory presence, not tracked
+                        // source provenance. Previously exported rows (normally
+                        // Status=ok) remain represented when their file goes
+                        // missing so conversion/deletion ambiguity still fails
+                        // closed.
+                        continue;
+                    }
+
                     string sourceName = cloneFileExists ? TryReadBlockNameFromSource(clonePath) : string.Empty;
                     DbSourceInfo dbSource = cloneFileExists ? ParseDbSource(clonePath) : new DbSourceInfo();
                     if (cloneFileExists)
@@ -20725,7 +20743,7 @@ namespace OpennessLLM
                         RelativePath = relativePath,
                         ClonePath = clonePath,
                         CurrentPath = string.Empty,
-                        ExportStatus = cloneFileExists ? GetCsvValue(row, "Status") : "missing-source",
+                        ExportStatus = cloneFileExists ? manifestStatus : "missing-source",
                         ExportMessage = cloneFileExists ? GetCsvValue(row, "Message") : "Tracked manifest source file is missing from _root.",
                         Provenance = "tracked-baseline"
                     });
@@ -23378,18 +23396,40 @@ namespace OpennessLLM
             string trackedCloneDir = Path.Combine(caseDir, "TRACKED_CLONE_PROJECT");
             string trackedRootDir = Path.Combine(trackedCloneDir, "_root");
             string missingTrackedPath = Path.Combine(trackedRootDir, "20_Widget_Old.scl");
+            string neverTrackedVisualPath = Path.Combine(trackedRootDir, "1_Main.lad");
             Directory.CreateDirectory(trackedRootDir);
             WriteCsv(
                 Path.Combine(trackedCloneDir, "plc-blocks.csv"),
                 new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "BlockType", "TypeName", "FilePath", "Status" },
                 new[]
                 {
-                    new[] { "PLC", string.Empty, "Widget_Old", "20", "FC", "SCL", "FC", "Siemens.Engineering.SW.Blocks.FC", missingTrackedPath, "ok" }
+                    new[] { "PLC", string.Empty, "Widget_Old", "20", "FC", "SCL", "FC", "Siemens.Engineering.SW.Blocks.FC", missingTrackedPath, "ok" },
+                    new[] { "PLC", string.Empty, "Main", "1", "OB", "LAD", "OB", "Siemens.Engineering.SW.Blocks.OB", neverTrackedVisualPath, "unsupported-language" }
                 });
             List<CloneBlockRecord> missingTracked = LoadCloneBlockManifest(trackedCloneDir, trackedRootDir);
             AssertTrue(missingTracked.Count == 1, "a manifest-tracked row must remain represented when its _root source is missing");
             AssertEqual("tracked-baseline", missingTracked[0].Provenance, "missing tracked source must retain tracked-baseline provenance");
             AssertTrue(!File.Exists(missingTracked[0].ClonePath), "tracked-source regression fixture must actually be missing");
+            AssertTrue(!missingTracked.Any(x => EqualsIgnoreCase(x.Name, "Main")), "a missing unsupported-language inventory row must not claim tracked source provenance when no clone source was ever produced");
+
+            CloneBlockRecord neverTrackedVisualCurrent = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC",
+                Name = "Main",
+                Number = "1",
+                NumberSpace = "OB",
+                ProgrammingLanguage = "LAD",
+                BlockType = "OB",
+                TypeName = "Siemens.Engineering.SW.Blocks.OB",
+                RelativePath = "1_Main.lad",
+                ClonePath = neverTrackedVisualPath,
+                ExportStatus = "unsupported-language",
+            };
+            List<CloneDiffRecord> neverTrackedVisualDiffs = BuildCloneBlockDiffs(
+                missingTracked,
+                new List<CloneBlockRecord> { neverTrackedVisualCurrent });
+            AssertTrue(neverTrackedVisualDiffs.Count == 1 && EqualsIgnoreCase(neverTrackedVisualDiffs[0].Status, "source-blocked-current-only"), "a pre-existing unsupported-language block without source history must remain current-only");
+            AssertTrue(BlockingSourceBlockedDiffCount(neverTrackedVisualDiffs) == 0, "a pre-existing unsupported-language block from inventory only must be informational");
 
             string trackedCurrentPath = Path.Combine(caseDir, "TRACKED_CURRENT", missingTracked[0].RelativePath);
             WriteTextFile(trackedCurrentPath, "FUNCTION \"Widget_Old\" : Void\nEND_FUNCTION\n");

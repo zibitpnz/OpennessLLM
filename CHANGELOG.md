@@ -35,6 +35,9 @@ All notable changes to OpennessLLM are recorded in this file.
   clone-side deletion; retained metadata is emitted only when needed as
   ambiguity evidence for an unsupported live block. A completed deletion,
   including the last block in a project, is accepted as a clean after-check.
+  A missing manifest row explicitly recorded as `unsupported-language` is not
+  treated as tracked source provenance because init-clone never produced a
+  source file for that inventory-only visual block.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
   software scope fails closed where identities could overlap. Loose sources do
   not inherit the first manifest software path, and explicit-new provenance
