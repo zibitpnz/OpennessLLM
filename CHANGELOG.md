@@ -34,7 +34,10 @@ All notable changes to OpennessLLM are recorded in this file.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
   software scope fails closed where identities could overlap. Loose sources do
   not inherit the first manifest software path, and explicit-new provenance
-  requires a nonempty sidecar `softwarePath`.
+  requires a nonempty sidecar `softwarePath`. A loose source without a sidecar
+  may match one uniquely corresponding live relative path after creation while
+  retaining unknown clone scope; multiple live scope candidates remain
+  unmatched and fail closed.
 - Safety-critical origin metadata is accepted only from a complete, valid flat
   JSON sidecar. Malformed/nested sidecars, invalid JSON escapes, and unescaped
   control characters remain `unknown-orphaned`; JSON whitespace, literals, and

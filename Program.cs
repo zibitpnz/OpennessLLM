@@ -13709,24 +13709,37 @@ namespace OpennessLLM
                 .Where(x => !string.IsNullOrWhiteSpace(x.Key))
                 .Where(x => x.Count() == 1)
                 .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, CloneBlockRecord> currentByRelative = currentBlocks
-                .GroupBy(CloneBlockRelativeIdentity, StringComparer.OrdinalIgnoreCase)
+            Dictionary<string, CloneBlockRecord> cloneByUnscopedRelative = cloneBlocks
+                .GroupBy(CloneBlockUnscopedRelativeIdentity, StringComparer.OrdinalIgnoreCase)
                 .Where(x => !string.IsNullOrWhiteSpace(x.Key))
                 .Where(x => x.Count() == 1)
                 .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
+            HashSet<string> uniqueCurrentUnscopedRelativePaths = new HashSet<string>(
+                currentBlocks
+                    .GroupBy(CloneBlockUnscopedRelativeIdentity, StringComparer.OrdinalIgnoreCase)
+                    .Where(x => !string.IsNullOrWhiteSpace(x.Key))
+                    .Where(x => x.Count() == 1)
+                    .Select(x => x.Key),
+                StringComparer.OrdinalIgnoreCase);
             Dictionary<string, CloneBlockRecord> cloneByIdentity = UniqueByIdentity(cloneBlocks);
             Dictionary<string, CloneBlockRecord> cloneByNumberIdentity = UniqueByNumberIdentity(cloneBlocks);
 
-            HashSet<string> usedCloneRelativePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<CloneBlockRecord> usedCloneBlocks = new HashSet<CloneBlockRecord>();
 
             foreach (CloneBlockRecord current in currentBlocks)
             {
                 if (!EqualsIgnoreCase(current.ExportStatus, "ok"))
                 {
-                    CloneBlockRecord blockedClone = FindCloneMatchForCurrent(current, cloneByRelative, cloneByIdentity, cloneByNumberIdentity);
+                    CloneBlockRecord blockedClone = FindCloneMatchForCurrent(
+                        current,
+                        cloneByRelative,
+                        cloneByUnscopedRelative,
+                        uniqueCurrentUnscopedRelativePaths,
+                        cloneByIdentity,
+                        cloneByNumberIdentity);
                     if (blockedClone != null)
                     {
-                        usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(blockedClone));
+                        usedCloneBlocks.Add(blockedClone);
                     }
 
                     diffs.Add(CloneDiff(SourceBlockedStatus(current, blockedClone), current, blockedClone, SourceBlockedMessage(current, blockedClone)));
@@ -13734,9 +13747,10 @@ namespace OpennessLLM
                 }
 
                 CloneBlockRecord clone;
-                if (cloneByRelative.TryGetValue(CloneBlockRelativeIdentity(current), out clone))
+                if (cloneByRelative.TryGetValue(CloneBlockRelativeIdentity(current), out clone)
+                    || TryGetUniqueCrossScopeRelativeMatch(current, cloneByUnscopedRelative, uniqueCurrentUnscopedRelativePaths, out clone))
                 {
-                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
+                    usedCloneBlocks.Add(clone);
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     bool metadataChanged = !EqualsIgnoreCase(current.Name, clone.Name)
                         || !EqualsIgnoreCase(EmptyIfNull(current.GroupPath), EmptyIfNull(clone.GroupPath))
@@ -13765,7 +13779,7 @@ namespace OpennessLLM
                 string identity = CloneBlockIdentity(current);
                 if (!string.IsNullOrEmpty(identity) && cloneByIdentity.TryGetValue(identity, out clone))
                 {
-                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
+                    usedCloneBlocks.Add(clone);
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone relative path was '" + clone.RelativePath + "', current relative path is '" + current.RelativePath + "'.";
@@ -13781,7 +13795,7 @@ namespace OpennessLLM
                 string numberIdentity = CloneBlockNumberIdentity(current);
                 if (!string.IsNullOrEmpty(numberIdentity) && cloneByNumberIdentity.TryGetValue(numberIdentity, out clone))
                 {
-                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
+                    usedCloneBlocks.Add(clone);
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone block '" + clone.Name + "' at '" + clone.RelativePath + "' matches current block '" + current.Name + "' at '" + current.RelativePath + "' by type and number.";
@@ -13799,12 +13813,7 @@ namespace OpennessLLM
 
             foreach (CloneBlockRecord clone in cloneBlocks)
             {
-                if (usedCloneRelativePaths.Contains(CloneBlockRelativeIdentity(clone)))
-                {
-                    continue;
-                }
-
-                if (currentByRelative.ContainsKey(CloneBlockRelativeIdentity(clone)))
+                if (usedCloneBlocks.Contains(clone))
                 {
                     continue;
                 }
@@ -13815,11 +13824,22 @@ namespace OpennessLLM
             return diffs.OrderBy(x => x.Status).ThenBy(x => x.GroupPath).ThenBy(x => SafeInt(x.Number)).ThenBy(x => x.Name).ToList();
         }
 
-        private static CloneBlockRecord FindCloneMatchForCurrent(CloneBlockRecord current, Dictionary<string, CloneBlockRecord> cloneByRelative, Dictionary<string, CloneBlockRecord> cloneByIdentity, Dictionary<string, CloneBlockRecord> cloneByNumberIdentity)
+        private static CloneBlockRecord FindCloneMatchForCurrent(
+            CloneBlockRecord current,
+            Dictionary<string, CloneBlockRecord> cloneByRelative,
+            Dictionary<string, CloneBlockRecord> cloneByUnscopedRelative,
+            HashSet<string> uniqueCurrentUnscopedRelativePaths,
+            Dictionary<string, CloneBlockRecord> cloneByIdentity,
+            Dictionary<string, CloneBlockRecord> cloneByNumberIdentity)
         {
             CloneBlockRecord clone;
             string relativeIdentity = CloneBlockRelativeIdentity(current);
             if (!string.IsNullOrWhiteSpace(relativeIdentity) && cloneByRelative.TryGetValue(relativeIdentity, out clone))
+            {
+                return clone;
+            }
+
+            if (TryGetUniqueCrossScopeRelativeMatch(current, cloneByUnscopedRelative, uniqueCurrentUnscopedRelativePaths, out clone))
             {
                 return clone;
             }
@@ -13837,6 +13857,37 @@ namespace OpennessLLM
             }
 
             return null;
+        }
+
+        private static bool TryGetUniqueCrossScopeRelativeMatch(
+            CloneBlockRecord current,
+            Dictionary<string, CloneBlockRecord> cloneByUnscopedRelative,
+            HashSet<string> uniqueCurrentUnscopedRelativePaths,
+            out CloneBlockRecord clone)
+        {
+            clone = null;
+            string relativePath = CloneBlockUnscopedRelativeIdentity(current);
+            if (string.IsNullOrWhiteSpace(relativePath)
+                || uniqueCurrentUnscopedRelativePaths == null
+                || !uniqueCurrentUnscopedRelativePaths.Contains(relativePath)
+                || cloneByUnscopedRelative == null
+                || !cloneByUnscopedRelative.TryGetValue(relativePath, out clone))
+            {
+                clone = null;
+                return false;
+            }
+
+            // Scoped rows from two distinct PLCs must never match merely because
+            // the shared physical _root layout produced the same relative path.
+            // This fallback exists only to bind an unscoped loose source to the
+            // one live export that can resolve it after creation.
+            if (!string.IsNullOrWhiteSpace(current.SoftwarePath) && !string.IsNullOrWhiteSpace(clone.SoftwarePath))
+            {
+                clone = null;
+                return false;
+            }
+
+            return true;
         }
 
         private static string SourceBlockedStatus(CloneBlockRecord current, CloneBlockRecord clone)
@@ -14067,6 +14118,11 @@ namespace OpennessLLM
             }
 
             return block.SoftwarePath + "|" + block.RelativePath;
+        }
+
+        private static string CloneBlockUnscopedRelativeIdentity(CloneBlockRecord block)
+        {
+            return block == null ? string.Empty : EmptyIfNull(block.RelativePath).Trim();
         }
 
         private static void WriteCloneCheckSummary(string path, InventorySnapshot snapshot, string outDir, string compareDir, List<CloneBlockRecord> cloneBlocks, List<CloneBlockRecord> currentBlocks, List<CloneDiffRecord> blockDiffs, List<CloneGroupDiffRecord> groupDiffs, string schemaVersion, string checkRunId)
@@ -23276,6 +23332,54 @@ namespace OpennessLLM
             AssertTrue(unknown.Count == 1, "loose clone source should be discovered");
             AssertEqual("unknown-orphaned", unknown[0].Provenance, "a loose source without exact origin sidecar must fail closed as unknown/orphaned");
             AssertEqual(string.Empty, unknown[0].SoftwarePath, "unscoped loose source must overlap all software paths conservatively");
+
+            string postApplyCurrentPath = Path.Combine(caseDir, "POST_APPLY_COMPARE", unknown[0].RelativePath);
+            WriteTextFile(postApplyCurrentPath, "FUNCTION \"Widget_New\" : Void\nEND_FUNCTION\n");
+            CloneBlockRecord scopedPostApply = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC",
+                GroupPath = unknown[0].GroupPath,
+                Name = unknown[0].Name,
+                Number = unknown[0].Number,
+                NumberSpace = unknown[0].NumberSpace,
+                ProgrammingLanguage = unknown[0].ProgrammingLanguage,
+                BlockType = unknown[0].BlockType,
+                TypeName = unknown[0].TypeName,
+                SourceTypeName = unknown[0].SourceTypeName,
+                RelativePath = unknown[0].RelativePath,
+                ClonePath = unknown[0].ClonePath,
+                CurrentPath = postApplyCurrentPath,
+                ExportStatus = "ok",
+            };
+            List<CloneDiffRecord> postApplyDiffs = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { unknown[0] },
+                new List<CloneBlockRecord> { scopedPostApply });
+            AssertTrue(postApplyDiffs.Count == 1, "a uniquely matching post-apply export must bind to its unscoped loose source");
+            AssertTrue(!postApplyDiffs.Any(x => EqualsIgnoreCase(x.Status, "added") || EqualsIgnoreCase(x.Status, "removed")), "a unique unscoped post-apply match must not become a false added/removed pair");
+            AssertEqual(string.Empty, postApplyDiffs[0].CloneSoftwarePath, "unique relative matching must preserve unknown clone scope for later ambiguity checks");
+            AssertEqual("PLC", postApplyDiffs[0].CurrentSoftwarePath, "post-apply match must retain the resolved live SoftwarePath separately");
+
+            CloneBlockRecord secondScopedPostApply = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC_2",
+                GroupPath = scopedPostApply.GroupPath,
+                Name = "Widget_Other",
+                Number = "32",
+                NumberSpace = scopedPostApply.NumberSpace,
+                ProgrammingLanguage = scopedPostApply.ProgrammingLanguage,
+                BlockType = scopedPostApply.BlockType,
+                TypeName = scopedPostApply.TypeName,
+                SourceTypeName = scopedPostApply.SourceTypeName,
+                RelativePath = scopedPostApply.RelativePath,
+                ClonePath = scopedPostApply.ClonePath,
+                CurrentPath = scopedPostApply.CurrentPath,
+                ExportStatus = "ok",
+            };
+            List<CloneDiffRecord> ambiguousPostApplyDiffs = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { unknown[0] },
+                new List<CloneBlockRecord> { scopedPostApply, secondScopedPostApply });
+            AssertTrue(ambiguousPostApplyDiffs.Count(x => EqualsIgnoreCase(x.Status, "removed")) == 1, "an unscoped loose source must remain unmatched when multiple live software scopes share its relative path");
+            AssertTrue(ambiguousPostApplyDiffs.Count(x => EqualsIgnoreCase(x.Status, "added")) == 2, "ambiguous cross-software relative paths must remain visible for the fail-closed bundle gate");
 
             List<Dictionary<string, string>> orphanedIdentityChange = new List<Dictionary<string, string>>
             {
