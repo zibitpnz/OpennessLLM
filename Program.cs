@@ -20421,14 +20421,13 @@ namespace OpennessLLM
                         ? fileName
                         : Path.Combine(SafeFilePath(groupPath), SafeFileName(fileName));
                     string clonePath = Path.Combine(rootDir, relativePath);
-                    if (!File.Exists(clonePath))
+                    bool cloneFileExists = File.Exists(clonePath);
+                    string sourceName = cloneFileExists ? TryReadBlockNameFromSource(clonePath) : string.Empty;
+                    DbSourceInfo dbSource = cloneFileExists ? ParseDbSource(clonePath) : new DbSourceInfo();
+                    if (cloneFileExists)
                     {
-                        continue;
+                        sourceTypeName = InferBlockTypeNameFromSourceFile(clonePath, language);
                     }
-
-                    string sourceName = TryReadBlockNameFromSource(clonePath);
-                    DbSourceInfo dbSource = ParseDbSource(clonePath);
-                    sourceTypeName = InferBlockTypeNameFromSourceFile(clonePath, language);
                     if (string.IsNullOrWhiteSpace(typeName))
                     {
                         typeName = sourceTypeName;
@@ -20488,8 +20487,8 @@ namespace OpennessLLM
                         RelativePath = relativePath,
                         ClonePath = clonePath,
                         CurrentPath = string.Empty,
-                        ExportStatus = GetCsvValue(row, "Status"),
-                        ExportMessage = GetCsvValue(row, "Message"),
+                        ExportStatus = cloneFileExists ? GetCsvValue(row, "Status") : "missing-source",
+                        ExportMessage = cloneFileExists ? GetCsvValue(row, "Message") : "Tracked manifest source file is missing from _root.",
                         Provenance = "tracked-baseline"
                     });
                 }
@@ -22867,6 +22866,22 @@ namespace OpennessLLM
 
         private static void SelfTestCloneSourceOriginProvenance(string caseDir)
         {
+            string trackedCloneDir = Path.Combine(caseDir, "TRACKED_CLONE_PROJECT");
+            string trackedRootDir = Path.Combine(trackedCloneDir, "_root");
+            string missingTrackedPath = Path.Combine(trackedRootDir, "20_Widget_Old.scl");
+            Directory.CreateDirectory(trackedRootDir);
+            WriteCsv(
+                Path.Combine(trackedCloneDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "BlockType", "TypeName", "FilePath", "Status" },
+                new[]
+                {
+                    new[] { "PLC", string.Empty, "Widget_Old", "20", "FC", "SCL", "FC", "Siemens.Engineering.SW.Blocks.FC", missingTrackedPath, "ok" }
+                });
+            List<CloneBlockRecord> missingTracked = LoadCloneBlockManifest(trackedCloneDir, trackedRootDir);
+            AssertTrue(missingTracked.Count == 1, "a manifest-tracked row must remain represented when its _root source is missing");
+            AssertEqual("tracked-baseline", missingTracked[0].Provenance, "missing tracked source must retain tracked-baseline provenance");
+            AssertTrue(!File.Exists(missingTracked[0].ClonePath), "tracked-source regression fixture must actually be missing");
+
             string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
             string rootDir = Path.Combine(cloneDir, "_root");
             string sourcePath = Path.Combine(rootDir, "31_Widget_New.scl");

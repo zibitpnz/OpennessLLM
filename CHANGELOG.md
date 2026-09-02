@@ -29,6 +29,8 @@ All notable changes to OpennessLLM are recorded in this file.
   `source-blocked-export-error`, and any unknown `source-blocked-*` status always
   block. A loose source without the exact origin assertion receives no
   new-block exemption, including when `plc-blocks.csv` is missing or partial.
+  Manifest rows also retain `tracked-baseline` provenance when their `_root`
+  source file is missing, so deleting the source cannot erase tracking history.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
   software scope fails closed where identities could overlap.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
