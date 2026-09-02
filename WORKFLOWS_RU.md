@@ -303,6 +303,11 @@ CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
 `unknown-orphaned` и при неоднозначности source-blocker gate завершится fail
 closed.
 
+`explicit-new-local-source` используется один раз. При первом точном совпадении
+с live TIA блоком инструмент меняет sidecar origin на `tracked-baseline` и
+добавляет строку в `plc-blocks.csv`. Не возвращайте marker обратно вручную:
+после применения блок уже является tracked baseline.
+
 Шаг 4. Dry-run и apply:
 
 ```cmd

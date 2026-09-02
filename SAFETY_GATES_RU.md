@@ -313,8 +313,25 @@ Loose-файл в `_root` без точного sidecar
 
 `check-clone` публикует отчёты как единый atomic evidence bundle. Marker
 `clone-check-bundle.json` записывается последним и содержит общий schema/run ID,
-row counts, SHA-256 и точный `_compare` directory. `apply-clone` и `sync-clone`
-fail closed при отсутствующем marker, неполном или смешанном наборе отчётов.
+row counts, SHA-256, точный `_compare` directory, нормализованный путь проекта,
+версию проекта, стабильный project object ID при его доступности и выбранный
+набор `SoftwarePath`. `apply-clone` сверяет target identity с открытым проектом
+до построения плана и любой TIA-записи. Bundle schema 1 для записи больше не
+принимается: после обновления нужен новый `check-clone`.
+
+`init-clone` и `check-clone` требуют ровно один выбранный `PlcSoftware`; в
+multi-PLC проекте read-only clone нужно ограничить через `--software-path`.
+`apply-clone` пока fail closed, если в открытом проекте больше одного
+`PlcSoftware`, даже при scoped bundle: это исключает выбор write-target по
+порядку enumeration.
+
+`explicit-new-local-source` — одноразовое состояние. При первом точном live TIA
+match sidecar безопасно переписывается в `tracked-baseline`, после чего строка
+атомарно публикуется в `plc-blocks.csv`. Если manifest позже потерян, stale
+sidecar уже не возвращает исключение, а даёт `unknown-orphaned`. Успешный
+`DeleteBlock` до post-check удаляет ровно одну соответствующую tracked-строку
+manifest, поэтому unrelated current-only visual block не может создать ложный
+after-write blocker только из-за завершённого удаления.
 
 `apply-clone` и `sync-clone` используют одну и ту же cross-report проверку.
 `sync-clone` выполняет её до создания backup, изменения source-файлов,

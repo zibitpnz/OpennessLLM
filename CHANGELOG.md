@@ -7,8 +7,23 @@ All notable changes to OpennessLLM are recorded in this file.
 - `check-clone` now publishes its block, group, source-blocker, and summary
   reports as one fail-closed evidence bundle. `clone-check-bundle.json` is
   committed last and binds a schema version, `CheckRunId`, row counts, hashes,
-  and the exact compare directory. `apply-clone` / `sync-clone` reject missing,
-  interrupted, tampered, or cross-run bundles before mutation.
+  the exact compare directory, normalized project path, project version, stable
+  project object identifier when available, and selected `SoftwarePath` set.
+  `apply-clone` / `sync-clone` reject missing, interrupted, tampered, cross-run,
+  or wrong-project bundles before mutation. This target binding is schema 2;
+  older bundles require a fresh `check-clone`.
+- `apply-clone` now resolves its TIA write target from the validated bundle and
+  fails closed before plan construction when the open project contains more
+  than one `PlcSoftware`. `init-clone` / `check-clone` likewise require one
+  selected PLC, with `--software-path` used to scope read-only clone work.
+- `explicit-new-local-source` is now a one-shot origin. The first exact live TIA
+  match consumes the sidecar marker and atomically promotes the source into
+  `plc-blocks.csv` as `tracked-baseline`; later manifest loss yields conservative
+  `unknown-orphaned` provenance instead of resurrecting the exemption.
+- A successfully completed `DeleteBlock` consumes exactly one matching tracked
+  manifest row before the post-apply check. An unrelated current-only visual
+  block can no longer turn that completed deletion into a false after-write
+  blocker and leave a valid result unsavable.
 - `sync-clone` no longer guesses the newest `_compare` directory; it consumes
   the directory bound to the validated bundle and verifies current-source
   hashes before copying.
@@ -80,10 +95,13 @@ All notable changes to OpennessLLM are recorded in this file.
   `source-blocker-report-cross-check`, and
   `sync-clone-source-blocker-cross-report-gate`, plus interrupted bundle and
   durable-origin regression cases.
+- Added full transition regressions for post-delete classification,
+  explicit-new promotion plus later manifest loss, multi-PLC apply rejection,
+  and project-A bundle/project-B apply rejection.
 - Documentation now states explicitly that `apply-clone` does not compile;
   interface regressions are detected only by a subsequent external
   `compile-all --apply` in the full workflow.
-- Verification result: `self-test` passed `36/36`.
+- Verification result: `self-test` passed `40/40`.
 
 ## 0.12.3 - 2026-08-27
 

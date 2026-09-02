@@ -127,6 +127,11 @@ target:
 .\OpennessLLM\run.cmd status --attach --out .\CLONE_PROJECT --software-path "PLC_1" --hmi-target-path "HMI_1"
 ```
 
+`init-clone` and `check-clone` require exactly one selected `PlcSoftware`; use
+`--software-path` when the project contains more than one PLC. For write safety,
+`apply-clone` currently fails closed if the open project contains multiple
+`PlcSoftware` objects, even when the evidence bundle was created with a filter.
+
 Accept the latest `check-clone` result into `CLONE_PROJECT`:
 
 ```cmd
@@ -220,7 +225,12 @@ check, apply is refused.
 one evidence bundle committed by `clone-check-bundle.json`. `apply-clone` and
 `sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
 or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
-the marker and rechecks current-source hashes before changing `_root`.
+the marker and rechecks current-source hashes before changing `_root`. Bundle
+schema 2 also binds the normalized TIA project path, project version, stable
+project object identifier when available, and the selected `SoftwarePath` set.
+`apply-clone` validates all of these against the open project before constructing
+a plan or invoking any TIA write method. A schema-1 bundle must be refreshed by
+running `check-clone` again.
 
 For new clone-only blocks, an optional sidecar file can be placed next to the
 source file:
@@ -243,7 +253,12 @@ input, set `"sourceOrigin":"explicit-new-local-source"` in its sidecar; this is
 the only loose-source origin that receives the new-block exemption from the
 ambiguous visual-block gate. A nonempty `softwarePath` in the same valid flat
 JSON sidecar is required; malformed/nested metadata or invalid JSON escapes
-remain `unknown-orphaned`.
+remain `unknown-orphaned`. This origin is one-shot: the first exact live TIA
+match rewrites the sidecar origin to `tracked-baseline` and atomically adds the
+source to `plc-blocks.csv`. If that manifest row is later lost, the consumed
+sidecar becomes `unknown-orphaned` instead of receiving the new-block exemption
+again. A successfully completed clone-side deletion consumes its stale manifest
+row before the post-apply check.
 
 When the project is already open in TIA Portal, use `--attach`:
 

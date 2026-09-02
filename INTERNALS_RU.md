@@ -412,8 +412,8 @@ write workflow. Он получает export/source blocker status.
 6. Сравнивает baseline, live TIA и clone files.
 7. Пишет block/group/source-blocker/summary reports во временный staging.
 8. Atomic replace публикует отчёты, затем последним записывает
-   `clone-check-bundle.json` с schema/run ID, row counts, SHA-256 и точным
-   compare directory.
+   `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
+   compare directory, normalized project identity и выбранным `SoftwarePath`.
 9. `apply-clone` / `sync-clone` принимают только полностью проверенный bundle.
 ```
 
@@ -496,19 +496,22 @@ LLM экономит токены и время;
 Pipeline:
 
 ```text
-1. Собрать live inventory.
-2. Прочитать CLONE_PROJECT baseline и текущие clone files.
-3. Построить apply plan.
-4. Классифицировать операции: update/create/delete/rename/noop/blocker.
-5. Запустить preflight checks.
-6. Записать preflight reports.
-7. Если dry-run, остановиться до TIA writes.
-8. Если --apply, выполнить before-write gates.
-9. Создать backup, если требуется.
-10. Проверить live source drift для изменяемых blocks.
-11. Применить операции через TIA SDK / External Sources.
-12. Запустить post-check reports.
-13. Сохранить проект только при --save и accepted result.
+1. Прочитать и проверить atomic clone-check bundle.
+2. Собрать live inventory и до плана сверить project path/version/object ID и
+   единственный `SoftwarePath` с bundle.
+3. Прочитать CLONE_PROJECT baseline и текущие clone files.
+4. Построить apply plan только для проверенного PlcSoftware.
+5. Классифицировать операции: update/create/delete/rename/noop/blocker.
+6. Запустить preflight checks.
+7. Записать preflight reports.
+8. Если dry-run, остановиться до TIA writes.
+9. Если --apply, выполнить before-write gates.
+10. Создать backup, если требуется.
+11. Проверить live source drift для изменяемых blocks.
+12. Применить операции через TIA SDK / External Sources.
+13. Зафиксировать lifecycle metadata: consume explicit-new и завершённые deletes.
+14. Запустить post-check reports.
+15. Сохранить проект только при --save и accepted result.
 ```
 
 Ключевые отчеты:
@@ -564,6 +567,10 @@ sourceOrigin
 новый локальный source, причём в том же валидном flat JSON обязателен непустой
 `softwarePath`. Malformed/nested sidecar, потеря или неполнота manifest не дают
 этого исключения; loose source также не наследует первый software path из manifest.
+
+Это one-shot provenance: первый точный live match переписывает origin в sidecar
+на `tracked-baseline` и атомарно добавляет manifest row. При последующей потере
+manifest такой source становится `unknown-orphaned`, а не снова explicit-new.
 
 Если sidecar отсутствует, numeric prefix filename может означать manual block
 number.

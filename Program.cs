@@ -28,7 +28,7 @@ namespace OpennessLLM
         private const string ProductVersion = "0.12.3";
         private const string ProductVersionDate = "2026-08-27";
         private const string ProductCreator = "Zibitpnz";
-        private const string CloneCheckBundleSchemaVersion = "1";
+        private const string CloneCheckBundleSchemaVersion = "2";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
         private const string CloneCheckBlockFileName = "clone-check-blocks.csv";
         private const string CloneCheckGroupFileName = "clone-check-groups.csv";
@@ -3842,11 +3842,13 @@ namespace OpennessLLM
         private static InventorySnapshot CollectInventory(object project, string projectPath)
         {
             InventorySnapshot snapshot = new InventorySnapshot();
-            snapshot.ProjectPath = projectPath;
+            snapshot.ProjectPath = NormalizeComparablePath(projectPath);
             snapshot.ProjectName = SafeGet(project, "Name");
             snapshot.ProjectType = project.GetType().FullName;
+            snapshot.ProjectVersion = GetProjectVersionMajor(projectPath).ToString(CultureInfo.InvariantCulture);
             snapshot.CreatedAt = DateTime.Now;
             snapshot.ObjectIdentifierProvider = TryGetObjectIdentifierProvider(project);
+            TryReadTiaObjectId(snapshot.ObjectIdentifierProvider, project, out snapshot.ProjectObjectId, out snapshot.ProjectObjectIdStatus);
 
             object devices = TryGetPropertyValue(project, "Devices");
             if (devices != null)
@@ -3876,6 +3878,9 @@ namespace OpennessLLM
             snapshot.ProjectPath = source.ProjectPath;
             snapshot.ProjectName = source.ProjectName;
             snapshot.ProjectType = source.ProjectType;
+            snapshot.ProjectVersion = source.ProjectVersion;
+            snapshot.ProjectObjectId = source.ProjectObjectId;
+            snapshot.ProjectObjectIdStatus = source.ProjectObjectIdStatus;
             snapshot.CreatedAt = source.CreatedAt;
             snapshot.ObjectIdentifierProvider = source.ObjectIdentifierProvider;
 
@@ -13434,7 +13439,8 @@ namespace OpennessLLM
             CloneBlockFolderStructure(snapshot, outDir);
             WriteCloneSummary(snapshot, outDir, options.Force);
 
-            object software = GetFirstPlcSoftware(snapshot);
+            DeviceRecord softwareRecord = RequireSinglePlcSoftware(snapshot, "init-clone");
+            object software = softwareRecord.Object;
             object externalSourceGroup = TryGetPropertyValue(software, "ExternalSourceGroup");
             if (externalSourceGroup == null)
             {
@@ -13526,7 +13532,9 @@ namespace OpennessLLM
             string compareRootDir = Path.Combine(compareDir, "_root");
             Directory.CreateDirectory(compareRootDir);
 
-            object software = GetFirstPlcSoftware(snapshot);
+            DeviceRecord softwareRecord = RequireSinglePlcSoftware(snapshot, "check-clone");
+            CloneCheckTargetIdentity targetIdentity = CloneCheckTargetFromSnapshot(snapshot);
+            object software = softwareRecord.Object;
             object externalSourceGroup = TryGetPropertyValue(software, "ExternalSourceGroup");
             if (externalSourceGroup == null)
             {
@@ -13576,6 +13584,10 @@ namespace OpennessLLM
             }
 
             List<CloneBlockRecord> cloneBlocks = LoadCloneBlockManifest(outDir, rootDir);
+            if (PromoteMatchedExplicitNewSources(snapshot, outDir, rootDir, cloneBlocks) > 0)
+            {
+                cloneBlocks = LoadCloneBlockManifest(outDir, rootDir);
+            }
             List<CloneDiffRecord> blockDiffs = BuildCloneBlockDiffs(cloneBlocks, currentBlocks);
             List<CloneGroupDiffRecord> groupDiffs = BuildCloneGroupDiffs(outDir, snapshot);
 
@@ -13639,6 +13651,7 @@ namespace OpennessLLM
                 stagedMarkerPath,
                 checkRunId,
                 compareDir,
+                targetIdentity,
                 stagedBlockReportPath,
                 blockDiffs.Count,
                 stagedGroupReportPath,
@@ -14226,6 +14239,7 @@ namespace OpennessLLM
             string path,
             string checkRunId,
             string compareDirectory,
+            CloneCheckTargetIdentity target,
             string blockPath,
             int blockRowCount,
             string groupPath,
@@ -14234,6 +14248,12 @@ namespace OpennessLLM
             int sourceBlockerRowCount,
             string summaryPath)
         {
+            if (target == null)
+            {
+                throw new ArgumentNullException("target");
+            }
+
+            string softwarePaths = CanonicalSoftwarePaths(target.SoftwarePaths);
             using (StreamWriter writer = NewUtf8Writer(path))
             {
                 writer.WriteLine("{");
@@ -14241,6 +14261,14 @@ namespace OpennessLLM
                 writer.WriteLine("  \"schemaVersion\": " + Json(CloneCheckBundleSchemaVersion) + ",");
                 writer.WriteLine("  \"checkRunId\": " + Json(checkRunId) + ",");
                 writer.WriteLine("  \"compareDirectory\": " + Json(Path.GetFullPath(compareDirectory)) + ",");
+                writer.WriteLine("  \"projectPath\": " + Json(NormalizeComparablePath(target.ProjectPath)) + ",");
+                writer.WriteLine("  \"projectName\": " + Json(EmptyIfNull(target.ProjectName)) + ",");
+                writer.WriteLine("  \"projectVersion\": " + Json(EmptyIfNull(target.ProjectVersion)) + ",");
+                writer.WriteLine("  \"projectObjectId\": " + Json(EmptyIfNull(target.ProjectObjectId)) + ",");
+                writer.WriteLine("  \"projectObjectIdStatus\": " + Json(EmptyIfNull(target.ProjectObjectIdStatus)) + ",");
+                writer.WriteLine("  \"softwarePathCount\": " + Json(target.SoftwarePaths.Count.ToString(CultureInfo.InvariantCulture)) + ",");
+                writer.WriteLine("  \"softwarePathsSha256\": " + Json(ComputeTextSha256(softwarePaths)) + ",");
+                writer.WriteLine("  \"softwarePaths\": " + Json(softwarePaths) + ",");
                 writer.WriteLine("  \"blockSha256\": " + Json(ComputeFileSha256(blockPath)) + ",");
                 writer.WriteLine("  \"blockRowCount\": " + Json(blockRowCount.ToString(CultureInfo.InvariantCulture)) + ",");
                 writer.WriteLine("  \"groupSha256\": " + Json(ComputeFileSha256(groupPath)) + ",");
@@ -14296,7 +14324,7 @@ namespace OpennessLLM
                 throw new InvalidDataException("Completed clone-check bundle marker is missing. Run check-clone again: " + markerPath);
             }
 
-            Dictionary<string, string> marker = ParseFlatJsonObject(File.ReadAllText(markerPath, Encoding.UTF8), markerPath);
+            Dictionary<string, string> marker = ParseStrictFlatJsonObject(File.ReadAllText(markerPath, Encoding.UTF8), markerPath);
             string state = RequiredCloneCheckMarkerValue(marker, "state", markerPath);
             string schemaVersion = RequiredCloneCheckMarkerValue(marker, "schemaVersion", markerPath);
             string checkRunId = RequiredCloneCheckMarkerValue(marker, "checkRunId", markerPath);
@@ -14336,11 +14364,45 @@ namespace OpennessLLM
             ValidateNoConflictingClonePhysicalPaths(outDir, compareDirectory, blockRows);
             ValidateNoConflictingCloneDiffPairs(blockRows);
 
+            string projectPath = NormalizeComparablePath(RequiredCloneCheckMarkerValue(marker, "projectPath", markerPath));
+            string projectName = MarkerValue(marker, "projectName");
+            string projectVersion = RequiredCloneCheckMarkerValue(marker, "projectVersion", markerPath);
+            string projectObjectId = MarkerValue(marker, "projectObjectId");
+            string projectObjectIdStatus = RequiredCloneCheckMarkerValue(marker, "projectObjectIdStatus", markerPath);
+            string softwarePathsText = RequiredCloneCheckMarkerValue(marker, "softwarePaths", markerPath);
+            List<string> softwarePaths = softwarePathsText
+                .Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            int softwarePathCount;
+            if (!int.TryParse(RequiredCloneCheckMarkerValue(marker, "softwarePathCount", markerPath), NumberStyles.None, CultureInfo.InvariantCulture, out softwarePathCount)
+                || softwarePathCount <= 0
+                || softwarePathCount != softwarePaths.Count)
+            {
+                throw new InvalidDataException("Clone-check bundle has an invalid or inconsistent softwarePathCount.");
+            }
+
+            if (!EqualsIgnoreCase(
+                ComputeTextSha256(CanonicalSoftwarePaths(softwarePaths)),
+                RequiredCloneCheckMarkerValue(marker, "softwarePathsSha256", markerPath)))
+            {
+                throw new InvalidDataException("Clone-check bundle software-path set hash mismatch.");
+            }
+
             return new CloneCheckBundleEvidence
             {
                 SchemaVersion = schemaVersion,
                 CheckRunId = checkRunId,
                 CompareDirectory = compareDirectory,
+                ProjectPath = projectPath,
+                ProjectName = projectName,
+                ProjectVersion = projectVersion,
+                ProjectObjectId = projectObjectId,
+                ProjectObjectIdStatus = projectObjectIdStatus,
+                SoftwarePaths = softwarePaths,
                 BlockRows = blockRows,
                 GroupRows = groupRows,
                 SourceBlockerRows = sourceBlockerRows
@@ -14356,6 +14418,12 @@ namespace OpennessLLM
             }
 
             return value.Trim();
+        }
+
+        private static string MarkerValue(Dictionary<string, string> marker, string key)
+        {
+            string value;
+            return marker != null && marker.TryGetValue(key, out value) ? EmptyIfNull(value).Trim() : string.Empty;
         }
 
         private static List<Dictionary<string, string>> ValidateCloneCheckCsvFile(
@@ -16973,6 +17041,36 @@ namespace OpennessLLM
 
             AddApplyCloneGate(gates, "before-write", "workspace-reports", "passed", true, true, false, "Clone root and atomic clone-check evidence bundle are valid.", Path.Combine(outDir, CloneCheckBundleFileName), "matching schema/run IDs, hashes, and row counts", "run=" + bundle.CheckRunId);
 
+            InventorySnapshot rawSnapshot;
+            InventorySnapshot snapshot;
+            DeviceRecord softwareRecord;
+            try
+            {
+                rawSnapshot = CollectInventory(project, options.ProjectPath);
+                softwareRecord = ValidateCloneCheckBundleTarget(bundle, rawSnapshot);
+                snapshot = FilterInventoryBySoftwarePath(rawSnapshot, softwareRecord.Path);
+            }
+            catch (Exception ex)
+            {
+                AddApplyCloneGate(gates, "before-write", "target-identity", "failed", true, true, false, "Clone-check evidence does not authorize this open project/PLC: " + ex.Message, Path.Combine(outDir, CloneCheckBundleFileName), "same normalized project path/version/stable ID and exactly one matching PlcSoftware", ex.GetType().Name + ": " + ex.Message);
+                WriteApplyClonePreflightReports(outDir, plan, preflight.Issues);
+                WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
+                throw new InvalidOperationException("apply-clone clone-check target identity validation failed before plan construction.", ex);
+            }
+
+            AddApplyCloneGate(
+                gates,
+                "before-write",
+                "target-identity",
+                "passed",
+                true,
+                true,
+                false,
+                "Clone-check evidence is bound to this open project and its only PlcSoftware.",
+                Path.Combine(outDir, CloneCheckBundleFileName),
+                "same normalized project path/version/stable ID and exactly one matching PlcSoftware",
+                "project=" + snapshot.ProjectPath + "; softwarePath=" + softwareRecord.Path);
+
             List<Dictionary<string, string>> allRows = bundle.BlockRows;
             List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
             int sourceBlockerCount = BlockingSourceBlockerCount(allRows, sourceBlockerRows);
@@ -17043,8 +17141,7 @@ namespace OpennessLLM
                 return;
             }
 
-            InventorySnapshot snapshot = CollectInventory(project, options.ProjectPath);
-            object software = GetFirstPlcSoftware(snapshot);
+            object software = softwareRecord.Object;
             object externalSourceGroup = TryGetPropertyValue(software, "ExternalSourceGroup");
             if (externalSourceGroup == null)
             {
@@ -17130,6 +17227,7 @@ namespace OpennessLLM
             bool afterCheckAccepted = false;
             try
             {
+                CommitCompletedApplyCloneDeletions(outDir, plan);
                 CheckProjectClone(afterApply, outDir);
                 CloneCheckBundleEvidence afterBundle = LoadAndValidateCloneCheckBundle(outDir);
                 if (File.Exists(blockReportPath))
@@ -17292,8 +17390,10 @@ namespace OpennessLLM
                 return;
             }
 
-            InventorySnapshot snapshot = CollectInventory(project, options.ProjectPath);
-            object software = GetFirstPlcSoftware(snapshot);
+            InventorySnapshot rawSnapshot = CollectInventory(project, options.ProjectPath);
+            DeviceRecord softwareRecord = ValidateCloneCheckBundleTarget(bundle, rawSnapshot);
+            InventorySnapshot snapshot = FilterInventoryBySoftwarePath(rawSnapshot, softwareRecord.Path);
+            object software = softwareRecord.Object;
             object externalSourceGroup = TryGetPropertyValue(software, "ExternalSourceGroup");
             if (externalSourceGroup == null)
             {
@@ -17609,6 +17709,10 @@ namespace OpennessLLM
             {
                 rowIndex++;
                 string status = GetCsvValue(row, "Status");
+                string softwarePath = FirstNonEmpty(
+                    GetCsvValue(row, "CurrentSoftwarePath"),
+                    GetCsvValue(row, "CloneSoftwarePath"),
+                    GetCsvValue(row, "SoftwarePath"));
                 bool isChanged = EqualsIgnoreCase(status, "changed");
                 bool isCloneOnly = EqualsIgnoreCase(status, "removed");
                 bool isDeletedFromClone = EqualsIgnoreCase(status, "added");
@@ -17708,6 +17812,7 @@ namespace OpennessLLM
                     Key = rowIndex.ToString(),
                     SourceRowIndex = rowIndex,
                     Row = row,
+                    SoftwarePath = softwarePath,
                     Status = status,
                     Action = action,
                     CurrentGroupPath = currentGroupPath,
@@ -17764,6 +17869,16 @@ namespace OpennessLLM
 
         private static void ValidateApplyPlanItem(ApplyPlanItem item, List<ApplyPlanItem> plan, InventorySnapshot snapshot, string rootDir, bool strictVisualSource, ApplyPreflightResult result)
         {
+            List<DeviceRecord> selectedSoftware = GetPlcSoftwareRecords(snapshot);
+            if (string.IsNullOrWhiteSpace(item.SoftwarePath))
+            {
+                AddPreflightIssue(result, "error", "SOFTWARE_PATH_MISSING", item, (BlockRecord)null, "Apply plan row has no authoritative SoftwarePath.");
+            }
+            else if (selectedSoftware.Count != 1 || !EqualsIgnoreCase(item.SoftwarePath, selectedSoftware[0].Path))
+            {
+                AddPreflightIssue(result, "error", "SOFTWARE_PATH_MISMATCH", item, (BlockRecord)null, "Apply plan row does not target the bundle-selected PlcSoftware.");
+            }
+
             if (EqualsIgnoreCase(item.Action, "ForbiddenMove"))
             {
                 AddPreflightIssue(result, "error", "CLONE_SIDE_MOVE_FORBIDDEN", item, (BlockRecord)null, "Clone-side block move between groups is forbidden. Move the block manually in TIA, then run check-clone and sync-clone.");
@@ -18207,14 +18322,14 @@ namespace OpennessLLM
             WriteCsv(planPath,
                 new[]
                 {
-                    "Severity", "Action", "Status", "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumberSpace", "CurrentNumber",
+                    "Severity", "SoftwarePath", "Action", "Status", "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumberSpace", "CurrentNumber",
                     "TargetGroupPath", "TargetGroupPathDisplay", "TargetGroupPathKey", "TargetName", "TargetNumberSpace", "TargetNumber", "SourcePath",
                     "WillCreateGroup", "WillRename", "WillDelete", "WillGenerateSource",
                     "LiveSourceDriftChecked", "LiveSourceStatus", "CurrentSourceSha256", "LiveSourceSha256", "LiveSourcePath", "Message"
                 },
                 plan.Select(x => new[]
                 {
-                    PreflightSeverityForItem(x, issues), x.Action, x.Status, x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumberSpace, x.CurrentNumber,
+                    PreflightSeverityForItem(x, issues), x.SoftwarePath, x.Action, x.Status, x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumberSpace, x.CurrentNumber,
                     x.TargetGroupPath, x.TargetGroupPathDisplay, x.TargetGroupPath, x.TargetName, x.NumberSpace, x.TargetNumber, x.ClonePath,
                     x.WillCreateGroup.ToString(), x.WillRename.ToString(), x.WillDelete.ToString(), x.WillGenerateSource.ToString(),
                     x.LiveSourceDriftChecked.ToString(), x.LiveSourceStatus, x.CurrentSourceSha256, x.LiveSourceSha256, x.LiveSourcePath, x.Message
@@ -18796,6 +18911,7 @@ namespace OpennessLLM
             return new Dictionary<string, string>
             {
                 { "severity", severity },
+                { "softwarePath", item.SoftwarePath },
                 { "action", item.Action },
                 { "status", item.Status },
                 { "currentGroupPath", item.CurrentGroupPath },
@@ -19506,10 +19622,127 @@ namespace OpennessLLM
 
         private static object GetFirstPlcSoftware(InventorySnapshot snapshot)
         {
-            DeviceRecord record = snapshot.Devices.FirstOrDefault(x => x.Object != null
-                && EqualsIgnoreCase(x.Kind, "Software")
-                && (x.SoftwareType ?? string.Empty).IndexOf("PlcSoftware", StringComparison.OrdinalIgnoreCase) >= 0);
+            DeviceRecord record = GetPlcSoftwareRecords(snapshot).FirstOrDefault();
             return record == null ? null : record.Object;
+        }
+
+        private static List<DeviceRecord> GetPlcSoftwareRecords(InventorySnapshot snapshot)
+        {
+            return snapshot == null
+                ? new List<DeviceRecord>()
+                : snapshot.Devices
+                    .Where(x => x != null
+                        && EqualsIgnoreCase(x.Kind, "Software")
+                        && (x.SoftwareType ?? string.Empty).IndexOf("PlcSoftware", StringComparison.OrdinalIgnoreCase) >= 0)
+                    .GroupBy(x => EmptyIfNull(x.Path), StringComparer.OrdinalIgnoreCase)
+                    .Select(x => x.First())
+                    .OrderBy(x => EmptyIfNull(x.Path), StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+        }
+
+        private static DeviceRecord RequireSinglePlcSoftware(InventorySnapshot snapshot, string operation)
+        {
+            List<DeviceRecord> records = GetPlcSoftwareRecords(snapshot);
+            if (records.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    operation + " requires exactly one selected PlcSoftware; found "
+                    + records.Count.ToString(CultureInfo.InvariantCulture)
+                    + ". In a multi-PLC project, rerun the read-only clone command with --software-path. apply-clone remains fail-closed while more than one PlcSoftware is present in the open project.");
+            }
+
+            if (records[0].Object == null)
+            {
+                throw new InvalidOperationException(operation + " selected PlcSoftware has no live TIA object.");
+            }
+
+            return records[0];
+        }
+
+        private static CloneCheckTargetIdentity CloneCheckTargetFromSnapshot(InventorySnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                throw new ArgumentNullException("snapshot");
+            }
+
+            List<string> softwarePaths = GetPlcSoftwareRecords(snapshot)
+                .Select(x => EmptyIfNull(x.Path).Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (softwarePaths.Count == 0)
+            {
+                throw new InvalidOperationException("Clone-check target has no selected PlcSoftware path.");
+            }
+
+            return new CloneCheckTargetIdentity
+            {
+                ProjectPath = NormalizeComparablePath(snapshot.ProjectPath),
+                ProjectName = EmptyIfNull(snapshot.ProjectName),
+                ProjectVersion = FirstNonEmpty(snapshot.ProjectVersion, GetProjectVersionMajor(snapshot.ProjectPath).ToString(CultureInfo.InvariantCulture)),
+                ProjectObjectId = EmptyIfNull(snapshot.ProjectObjectId),
+                ProjectObjectIdStatus = FirstNonEmpty(snapshot.ProjectObjectIdStatus, "unavailable"),
+                SoftwarePaths = softwarePaths
+            };
+        }
+
+        private static string CanonicalSoftwarePaths(IEnumerable<string> softwarePaths)
+        {
+            return string.Join("\n", (softwarePaths ?? new string[0])
+                .Select(x => EmptyIfNull(x).Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToArray());
+        }
+
+        private static DeviceRecord ValidateCloneCheckBundleTarget(CloneCheckBundleEvidence bundle, InventorySnapshot snapshot)
+        {
+            if (bundle == null)
+            {
+                throw new ArgumentNullException("bundle");
+            }
+
+            DeviceRecord liveSoftware = RequireSinglePlcSoftware(snapshot, "apply-clone");
+            if (bundle.SoftwarePaths == null || bundle.SoftwarePaths.Count != 1)
+            {
+                throw new InvalidDataException("apply-clone requires a clone-check bundle scoped to exactly one PlcSoftware.");
+            }
+
+            if (!EqualsIgnoreCase(NormalizeComparablePath(bundle.ProjectPath), NormalizeComparablePath(snapshot.ProjectPath)))
+            {
+                throw new InvalidDataException("Clone-check bundle project path does not match the open TIA project.");
+            }
+
+            if (!EqualsIgnoreCase(bundle.ProjectVersion, snapshot.ProjectVersion))
+            {
+                throw new InvalidDataException("Clone-check bundle project version does not match the open TIA project.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(bundle.ProjectName)
+                && !EqualsIgnoreCase(bundle.ProjectName, snapshot.ProjectName))
+            {
+                throw new InvalidDataException("Clone-check bundle project name does not match the open TIA project.");
+            }
+
+            if (EqualsIgnoreCase(bundle.ProjectObjectIdStatus, "ok"))
+            {
+                if (!EqualsIgnoreCase(snapshot.ProjectObjectIdStatus, "ok")
+                    || string.IsNullOrWhiteSpace(bundle.ProjectObjectId)
+                    || !EqualsIgnoreCase(bundle.ProjectObjectId, snapshot.ProjectObjectId))
+                {
+                    throw new InvalidDataException("Clone-check bundle stable project identifier does not match the open TIA project.");
+                }
+            }
+
+            if (!EqualsIgnoreCase(bundle.SoftwarePaths[0], liveSoftware.Path))
+            {
+                throw new InvalidDataException("Clone-check bundle PlcSoftware path does not match the only PlcSoftware in the open TIA project.");
+            }
+
+            return liveSoftware;
         }
 
         private static object FindBlockGroup(object rootGroup, string groupPath)
@@ -20763,6 +20996,215 @@ namespace OpennessLLM
             }
 
             return records;
+        }
+
+        private static int PromoteMatchedExplicitNewSources(
+            InventorySnapshot snapshot,
+            string outDir,
+            string rootDir,
+            List<CloneBlockRecord> cloneBlocks)
+        {
+            List<CloneBlockRecord> pending = (cloneBlocks ?? new List<CloneBlockRecord>())
+                .Where(x => x != null
+                    && EqualsIgnoreCase(x.Provenance, "explicit-new-local-source")
+                    && CloneSourceFileExists(x))
+                .ToList();
+            if (pending.Count == 0)
+            {
+                return 0;
+            }
+
+            List<KeyValuePair<CloneBlockRecord, BlockRecord>> promotions = new List<KeyValuePair<CloneBlockRecord, BlockRecord>>();
+            foreach (CloneBlockRecord clone in pending)
+            {
+                List<BlockRecord> matches = (snapshot == null ? new List<BlockRecord>() : snapshot.Blocks)
+                    .Where(x => EqualsIgnoreCase(x.SoftwarePath, clone.SoftwarePath))
+                    .Where(x => EqualsIgnoreCase(EmptyIfNull(x.GroupPath), EmptyIfNull(clone.GroupPath)))
+                    .Where(x => EqualsIgnoreCase(x.Name, clone.Name))
+                    .Where(x => EqualsIgnoreCase(BlockNumberSpace(x), FirstNonEmpty(clone.NumberSpace, BlockNumberSpace(clone.TypeName, clone.ProgrammingLanguage))))
+                    .Where(x => string.IsNullOrWhiteSpace(clone.Number) || SafeInt(x.Number) == SafeInt(clone.Number))
+                    .ToList();
+                if (matches.Count == 1)
+                {
+                    promotions.Add(new KeyValuePair<CloneBlockRecord, BlockRecord>(clone, matches[0]));
+                }
+            }
+
+            if (promotions.Count == 0)
+            {
+                return 0;
+            }
+
+            string manifestPath = Path.Combine(outDir, "plc-blocks.csv");
+            string[] headers = BlockManifestHeaders();
+            List<Dictionary<string, string>> existingRows = File.Exists(manifestPath)
+                ? ReadCsv(manifestPath)
+                : new List<Dictionary<string, string>>();
+            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
+            {
+                if (existingRows.Any(row => ManifestRowMatchesBlock(row, promotion.Value)))
+                {
+                    throw new InvalidDataException(
+                        "Explicit-new source collides with an already tracked manifest identity: "
+                        + promotion.Key.SoftwarePath + "/" + promotion.Key.Name + ".");
+                }
+            }
+
+            // Consume the one-shot exemption before publishing tracked manifest
+            // rows. If interrupted between the two steps, the source becomes
+            // unknown/orphaned and remains fail-closed rather than becoming new
+            // again after a later manifest loss.
+            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
+            {
+                RewriteExplicitNewSidecarAsTracked(promotion.Key.ClonePath);
+            }
+
+            List<string[]> rows = existingRows
+                .Select(row => headers.Select(header => GetCsvValue(row, header)).ToArray())
+                .ToList();
+            foreach (KeyValuePair<CloneBlockRecord, BlockRecord> promotion in promotions)
+            {
+                CloneBlockRecord clone = promotion.Key;
+                BlockRecord current = promotion.Value;
+                rows.Add(BuildBlockManifestRow(
+                    current,
+                    clone.ClonePath,
+                    "ok",
+                    "Promoted from explicit-new-local-source after an exact live TIA match."));
+            }
+
+            WriteCsvAtomically(manifestPath, headers, rows, outDir);
+            return promotions.Count;
+        }
+
+        private static void RewriteExplicitNewSidecarAsTracked(string sourcePath)
+        {
+            string sidecarPath = sourcePath + ".meta.json";
+            Dictionary<string, string> sidecar = ParseStrictFlatJsonObject(File.ReadAllText(sidecarPath, Encoding.UTF8), sidecarPath);
+            if (!EqualsIgnoreCase(SidecarValue(sidecar, "sourceOrigin"), "explicit-new-local-source"))
+            {
+                throw new InvalidDataException("Expected explicit-new-local-source sidecar was not found during provenance promotion: " + sidecarPath);
+            }
+
+            sidecar["sourceOrigin"] = "tracked-baseline";
+            WriteFlatJsonObjectAtomically(sidecarPath, sidecar);
+        }
+
+        private static bool ManifestRowMatchesBlock(Dictionary<string, string> row, BlockRecord block)
+        {
+            if (row == null || block == null)
+            {
+                return false;
+            }
+
+            string rowTypeName = GetCsvValue(row, "TypeName");
+            string rowLanguage = GetCsvValue(row, "ProgrammingLanguage");
+            string rowNumberSpace = FirstNonEmpty(GetCsvValue(row, "NumberSpace"), BlockNumberSpace(rowTypeName, rowLanguage));
+            return EqualsIgnoreCase(GetCsvValue(row, "SoftwarePath"), block.SoftwarePath)
+                && EqualsIgnoreCase(RowGroupPathKey(row, "GroupPath"), EmptyIfNull(block.GroupPath))
+                && EqualsIgnoreCase(GetCsvValue(row, "Name"), block.Name)
+                && EqualsIgnoreCase(rowNumberSpace, BlockNumberSpace(block))
+                && SafeInt(GetCsvValue(row, "Number")) == SafeInt(block.Number);
+        }
+
+        private static void CommitCompletedApplyCloneDeletions(string outDir, List<ApplyPlanItem> plan)
+        {
+            List<ApplyPlanItem> deletions = (plan ?? new List<ApplyPlanItem>()).Where(x => x != null && x.WillDelete).ToList();
+            if (deletions.Count == 0)
+            {
+                return;
+            }
+
+            string manifestPath = Path.Combine(outDir, "plc-blocks.csv");
+            if (!File.Exists(manifestPath))
+            {
+                throw new InvalidDataException("Cannot commit completed clone deletions because plc-blocks.csv is missing.");
+            }
+
+            List<Dictionary<string, string>> rows = ReadCsv(manifestPath);
+            foreach (ApplyPlanItem deletion in deletions)
+            {
+                int removed = rows.RemoveAll(row => ManifestRowMatchesApplyDeletion(row, deletion));
+                if (removed != 1)
+                {
+                    throw new InvalidDataException(
+                        "Completed DeleteBlock could not consume exactly one tracked manifest row for "
+                        + deletion.SoftwarePath + "/" + deletion.CurrentName + ".");
+                }
+            }
+
+            string[] headers = BlockManifestHeaders();
+            WriteCsvAtomically(
+                manifestPath,
+                headers,
+                rows.Select(row => headers.Select(header => GetCsvValue(row, header)).ToArray()),
+                outDir);
+        }
+
+        private static bool ManifestRowMatchesApplyDeletion(Dictionary<string, string> row, ApplyPlanItem item)
+        {
+            string rowTypeName = GetCsvValue(row, "TypeName");
+            string rowLanguage = GetCsvValue(row, "ProgrammingLanguage");
+            string rowNumberSpace = FirstNonEmpty(GetCsvValue(row, "NumberSpace"), BlockNumberSpace(rowTypeName, rowLanguage));
+            return EqualsIgnoreCase(GetCsvValue(row, "SoftwarePath"), item.SoftwarePath)
+                && EqualsIgnoreCase(RowGroupPathKey(row, "GroupPath"), EmptyIfNull(item.CurrentGroupPath))
+                && EqualsIgnoreCase(GetCsvValue(row, "Name"), item.CurrentName)
+                && EqualsIgnoreCase(rowNumberSpace, item.CurrentNumberSpace)
+                && SafeInt(GetCsvValue(row, "Number")) == SafeInt(item.CurrentNumber);
+        }
+
+        private static void WriteCsvAtomically(string path, string[] headers, IEnumerable<string[]> rows, string stagingBaseDirectory)
+        {
+            string publishDir = Path.Combine(stagingBaseDirectory, "_manifest-publish", "run-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(publishDir);
+            string stagedPath = Path.Combine(publishDir, Path.GetFileName(path));
+            WriteCsv(stagedPath, headers, rows);
+            PublishFileAtomically(stagedPath, path, publishDir);
+            try
+            {
+                Directory.Delete(publishDir, true);
+                string parent = Path.GetDirectoryName(publishDir);
+                if (Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any())
+                {
+                    Directory.Delete(parent, false);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void WriteFlatJsonObjectAtomically(string path, Dictionary<string, string> values)
+        {
+            string stagedPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string backupPath = stagedPath + ".previous";
+            using (StreamWriter writer = NewUtf8Writer(stagedPath))
+            {
+                writer.WriteLine("{");
+                List<KeyValuePair<string, string>> entries = (values ?? new Dictionary<string, string>())
+                    .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    writer.Write("  " + Json(entries[i].Key) + ": " + Json(entries[i].Value));
+                    writer.WriteLine(i + 1 < entries.Count ? "," : string.Empty);
+                }
+
+                writer.WriteLine("}");
+            }
+
+            if (File.Exists(path))
+            {
+                File.Replace(stagedPath, path, backupPath, true);
+                if (File.Exists(backupPath))
+                {
+                    File.Delete(backupPath);
+                }
+            }
+            else
+            {
+                File.Move(stagedPath, path);
+            }
         }
 
         private static CloneBlockRecord CreateCloneBlockRecordFromSourceFile(string rootDir, string file, string message)
@@ -22121,6 +22563,10 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "sync-clone-source-blocker-cross-report-gate", SelfTestSyncCloneSourceBlockerCrossReportGate);
             RunSelfTestCase(results, outDir, "clone-check-bundle-interrupted-publication", SelfTestCloneCheckBundleInterruptedPublication);
             RunSelfTestCase(results, outDir, "clone-source-origin-provenance", SelfTestCloneSourceOriginProvenance);
+            RunSelfTestCase(results, outDir, "apply-clone-post-delete-transition", SelfTestApplyClonePostDeleteTransition);
+            RunSelfTestCase(results, outDir, "clone-source-origin-lifecycle", SelfTestCloneSourceOriginLifecycle);
+            RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
+            RunSelfTestCase(results, outDir, "clone-check-bundle-project-binding", SelfTestCloneCheckBundleProjectBinding);
             RunSelfTestCase(results, outDir, "apply-clone-canonical-source-formatting", SelfTestApplyCloneCanonicalSourceFormatting);
 
             WriteSelfTestReports(outDir, results);
@@ -23233,6 +23679,15 @@ namespace OpennessLLM
                 Path.Combine(cloneDir, CloneCheckBundleFileName),
                 checkRunId,
                 compareDirectory,
+                new CloneCheckTargetIdentity
+                {
+                    ProjectPath = Path.Combine(cloneDir, "self-test.ap21"),
+                    ProjectName = "self-test",
+                    ProjectVersion = "21",
+                    ProjectObjectId = string.Empty,
+                    ProjectObjectIdStatus = "unavailable",
+                    SoftwarePaths = new List<string> { "PLC" }
+                },
                 Path.Combine(cloneDir, CloneCheckBlockFileName),
                 blockRows,
                 groupPath,
@@ -23584,6 +24039,156 @@ namespace OpennessLLM
             AssertEqual("PLC", explicitNew[0].SoftwarePath, "sidecar softwarePath must scope a new local source");
         }
 
+        private static void SelfTestApplyClonePostDeleteTransition(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string missingSource = Path.Combine(rootDir, "20_FB20.scl");
+            Directory.CreateDirectory(rootDir);
+            WriteCsv(
+                Path.Combine(cloneDir, "plc-blocks.csv"),
+                BlockManifestHeaders(),
+                new[]
+                {
+                    new[]
+                    {
+                        "PLC", string.Empty, string.Empty, string.Empty, "FB20", "20", "False", "Manual", "FB",
+                        "SCL", "FB", "Siemens.Engineering.SW.Blocks.FB", "Siemens.Engineering.SW.Blocks.FB",
+                        string.Empty, string.Empty, string.Empty, string.Empty,
+                        "Standard", "True", "False", string.Empty, "empty",
+                        missingSource, string.Empty, string.Empty, "ok", "tracked before clone-side deletion"
+                    }
+                });
+
+            List<CloneBlockRecord> tracked = LoadCloneBlockManifest(cloneDir, rootDir);
+            string liveExportPath = Path.Combine(caseDir, "CURRENT", "20_FB20.scl");
+            WriteTextFile(liveExportPath, "FUNCTION_BLOCK \"FB20\"\nEND_FUNCTION_BLOCK\n");
+            CloneBlockRecord liveExportable = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC", Name = "FB20", Number = "20", NumberSpace = "FB", ProgrammingLanguage = "SCL",
+                BlockType = "FB", TypeName = "Siemens.Engineering.SW.Blocks.FB", RelativePath = "20_FB20.scl",
+                ClonePath = missingSource, CurrentPath = liveExportPath, ExportStatus = "ok"
+            };
+            CloneBlockRecord unrelatedVisual = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC", Name = "F_LAD", Number = "1", NumberSpace = "FB", ProgrammingLanguage = "F_LAD",
+                BlockType = "FB", TypeName = "Siemens.Engineering.SW.Blocks.FB", RelativePath = "1_F_LAD.lad",
+                ClonePath = Path.Combine(rootDir, "1_F_LAD.lad"), ExportStatus = "unsupported-language"
+            };
+
+            List<CloneDiffRecord> before = BuildCloneBlockDiffs(tracked, new List<CloneBlockRecord> { liveExportable, unrelatedVisual });
+            AssertTrue(before.Any(x => EqualsIgnoreCase(x.Status, "added") && EqualsIgnoreCase(x.Name, "FB20")), "missing tracked FB20 source must plan DeleteBlock before the write");
+            AssertTrue(BlockingSourceBlockedDiffCount(before) == 0, "unrelated current-only F_LAD must be informational before DeleteBlock");
+
+            List<CloneDiffRecord> unsafeAfter = BuildCloneBlockDiffs(tracked, new List<CloneBlockRecord> { unrelatedVisual });
+            AssertTrue(BlockingSourceBlockedDiffCount(unsafeAfter) > 0, "fixture must reproduce the old post-delete false blocker while stale manifest evidence remains");
+
+            BlockRecord deleted = CreateSelfTestBlock("FB20", 20, "SCL", "Siemens.Engineering.SW.Blocks.FB");
+            ApplyPlanItem deletePlan = CreateSelfTestDeletePlanItem(deleted);
+            CommitCompletedApplyCloneDeletions(cloneDir, new List<ApplyPlanItem> { deletePlan });
+
+            List<CloneBlockRecord> committed = LoadCloneBlockManifest(cloneDir, rootDir);
+            List<CloneDiffRecord> safeAfter = BuildCloneBlockDiffs(committed, new List<CloneBlockRecord> { unrelatedVisual });
+            AssertTrue(!safeAfter.Any(x => EqualsIgnoreCase(x.Status, "removed")), "completed DeleteBlock must consume its tracked manifest row");
+            AssertTrue(BlockingSourceBlockedDiffCount(safeAfter) == 0, "post-delete check must remain accepted with an unrelated current-only F_LAD block");
+        }
+
+        private static void SelfTestCloneSourceOriginLifecycle(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string sourcePath = Path.Combine(rootDir, "31_Widget_New.scl");
+            WriteTextFile(sourcePath, "FUNCTION \"Widget_New\" : Void\nEND_FUNCTION\n");
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"31\",\"numberMode\":\"Manual\"}\n");
+
+            List<CloneBlockRecord> pending = LoadCloneBlockManifest(cloneDir, rootDir);
+            AssertEqual("explicit-new-local-source", pending[0].Provenance, "new local source must begin in pending provenance state");
+
+            BlockRecord live = CreateSelfTestBlock("Widget_New", 31, "SCL", "Siemens.Engineering.SW.Blocks.FC");
+            InventorySnapshot snapshot = CreateSelfTestApplySnapshot(live);
+            int promoted = PromoteMatchedExplicitNewSources(snapshot, cloneDir, rootDir, pending);
+            AssertTrue(promoted == 1, "first exact live match must promote explicit-new provenance exactly once");
+            AssertEqual("tracked-baseline", SidecarValue(LoadSidecarMetadata(sourcePath), "sourceOrigin"), "one-shot sidecar origin must be consumed after promotion");
+            AssertEqual("tracked-baseline", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "promoted source must be represented by the tracked manifest");
+
+            File.Delete(Path.Combine(cloneDir, "plc-blocks.csv"));
+            CloneBlockRecord afterManifestLoss = LoadCloneBlockManifest(cloneDir, rootDir)[0];
+            AssertEqual("unknown-orphaned", afterManifestLoss.Provenance, "manifest loss must not resurrect consumed explicit-new provenance");
+
+            CloneBlockRecord renamedVisual = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC", Name = "Widget_Renamed", Number = "99", NumberSpace = "FC", ProgrammingLanguage = "LAD",
+                BlockType = "FC", TypeName = "Siemens.Engineering.SW.Blocks.FC", RelativePath = "99_Widget_Renamed.lad",
+                ClonePath = Path.Combine(rootDir, "99_Widget_Renamed.lad"), ExportStatus = "unsupported-language"
+            };
+            List<CloneDiffRecord> laterConversion = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { afterManifestLoss },
+                new List<CloneBlockRecord> { renamedVisual });
+            AssertTrue(BlockingSourceBlockedDiffCount(laterConversion) > 0, "renamed+renumbered visual conversion must fail closed after promotion and later manifest loss");
+        }
+
+        private static void SelfTestApplyCloneMultiPlcFailClosed(string caseDir)
+        {
+            InventorySnapshot snapshot = CreateSelfTestApplySnapshot();
+            snapshot.Devices.Clear();
+            snapshot.Devices.Add(new DeviceRecord { Kind = "Software", Path = "PLC_A", SoftwareType = "Siemens.Engineering.SW.PlcSoftware", Object = new object() });
+            snapshot.Devices.Add(new DeviceRecord { Kind = "Software", Path = "PLC_B", SoftwareType = "Siemens.Engineering.SW.PlcSoftware", Object = new object() });
+            CloneCheckBundleEvidence bundle = new CloneCheckBundleEvidence
+            {
+                ProjectPath = snapshot.ProjectPath,
+                ProjectName = snapshot.ProjectName,
+                ProjectVersion = snapshot.ProjectVersion,
+                ProjectObjectIdStatus = "unavailable",
+                SoftwarePaths = new List<string> { "PLC_B" }
+            };
+
+            bool blocked = false;
+            try
+            {
+                ValidateCloneCheckBundleTarget(bundle, snapshot);
+            }
+            catch (InvalidOperationException ex)
+            {
+                blocked = ex.Message.IndexOf("exactly one selected PlcSoftware", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            AssertTrue(blocked, "apply-clone must fail closed before target selection when the open project contains two PlcSoftware objects");
+        }
+
+        private static void SelfTestCloneCheckBundleProjectBinding(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string compareDir = Path.Combine(cloneDir, "_compare", "current-self-test");
+            Directory.CreateDirectory(Path.Combine(compareDir, "_root"));
+            string checkRunId = Guid.NewGuid().ToString("N");
+            WriteCsv(Path.Combine(cloneDir, CloneCheckBlockFileName), new[] { "CheckSchemaVersion", "CheckRunId" }, new string[0][]);
+            WriteCsv(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName), new[] { "CheckSchemaVersion", "CheckRunId" }, new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 0, 0);
+            CloneCheckBundleEvidence bundle = LoadAndValidateCloneCheckBundle(cloneDir);
+
+            InventorySnapshot matching = CreateSelfTestApplySnapshot();
+            matching.ProjectPath = Path.Combine(cloneDir, "self-test.ap21");
+            DeviceRecord selected = ValidateCloneCheckBundleTarget(bundle, matching);
+            AssertEqual("PLC", selected.Path, "project-A bundle must validate against the exact project-A/PLC target");
+
+            string sentinel = Path.Combine(caseDir, "no-write-sentinel.txt");
+            WriteTextFile(sentinel, "unchanged\n");
+            InventorySnapshot otherProject = CreateSelfTestApplySnapshot();
+            otherProject.ProjectPath = Path.Combine(caseDir, "PROJECT_B", "self-test.ap21");
+            bool blocked = false;
+            try
+            {
+                ValidateCloneCheckBundleTarget(bundle, otherProject);
+            }
+            catch (InvalidDataException ex)
+            {
+                blocked = ex.Message.IndexOf("project path", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            AssertTrue(blocked, "a project-A bundle must be rejected for project B before plan construction or mutation");
+            AssertEqual("unchanged\n", File.ReadAllText(sentinel, Encoding.UTF8).Replace("\r\n", "\n"), "project mismatch rejection must occur before any mutation");
+        }
+
         private static void SelfTestApplyCloneGatesFinalDuplicateNumber(string caseDir)
         {
             string rootDir = Path.Combine(caseDir, "_root");
@@ -23646,6 +24251,7 @@ namespace OpennessLLM
             {
                 Key = name,
                 SourceRowIndex = number,
+                SoftwarePath = "PLC",
                 Row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     { "CloneSourceSha256", sourceHash }
@@ -23686,6 +24292,7 @@ namespace OpennessLLM
             return new ApplyPlanItem
             {
                 Key = block.Name,
+                SoftwarePath = FirstNonEmpty(block.SoftwarePath, "PLC"),
                 Row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                 Status = "added",
                 Action = "DeleteBlock",
@@ -23716,12 +24323,23 @@ namespace OpennessLLM
             InventorySnapshot snapshot = new InventorySnapshot
             {
                 ProjectName = "self-test",
-                ProjectPath = "self-test.ap21",
+                ProjectPath = Path.GetFullPath("self-test.ap21"),
                 ProjectType = "self-test",
+                ProjectVersion = "21",
+                ProjectObjectId = string.Empty,
+                ProjectObjectIdStatus = "unavailable",
                 CreatedAt = DateTime.UtcNow
             };
+            snapshot.Devices.Add(new DeviceRecord
+            {
+                Kind = "Software",
+                Path = "PLC",
+                SoftwareType = "Siemens.Engineering.SW.PlcSoftware",
+                Object = new object()
+            });
             foreach (BlockRecord block in blocks.Where(x => x != null))
             {
+                block.SoftwarePath = FirstNonEmpty(block.SoftwarePath, "PLC");
                 snapshot.Blocks.Add(block);
             }
 
@@ -23732,6 +24350,7 @@ namespace OpennessLLM
         {
             return new BlockRecord
             {
+                SoftwarePath = "PLC",
                 GroupPath = string.Empty,
                 GroupPathDisplay = string.Empty,
                 Name = name,
@@ -25382,6 +26001,9 @@ namespace OpennessLLM
             public string ProjectName;
             public string ProjectPath;
             public string ProjectType;
+            public string ProjectVersion;
+            public string ProjectObjectId;
+            public string ProjectObjectIdStatus;
             public DateTime CreatedAt;
             public object ObjectIdentifierProvider;
             public readonly List<DeviceRecord> Devices = new List<DeviceRecord>();
@@ -26050,6 +26672,7 @@ namespace OpennessLLM
             public string Key;
             public int SourceRowIndex;
             public Dictionary<string, string> Row;
+            public string SoftwarePath;
             public string Status;
             public string Action;
             public string CurrentGroupPath;
@@ -26315,9 +26938,25 @@ namespace OpennessLLM
             public string SchemaVersion;
             public string CheckRunId;
             public string CompareDirectory;
+            public string ProjectPath;
+            public string ProjectName;
+            public string ProjectVersion;
+            public string ProjectObjectId;
+            public string ProjectObjectIdStatus;
+            public List<string> SoftwarePaths = new List<string>();
             public List<Dictionary<string, string>> BlockRows;
             public List<Dictionary<string, string>> GroupRows;
             public List<Dictionary<string, string>> SourceBlockerRows;
+        }
+
+        private sealed class CloneCheckTargetIdentity
+        {
+            public string ProjectPath;
+            public string ProjectName;
+            public string ProjectVersion;
+            public string ProjectObjectId;
+            public string ProjectObjectIdStatus;
+            public List<string> SoftwarePaths = new List<string>();
         }
 
         private sealed class DbSourceInfo

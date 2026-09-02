@@ -670,11 +670,19 @@ unsupported
 ```
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
+Текущий bundle schema 2 привязан к normalized project path, версии проекта,
+стабильному project object ID при доступности и выбранному `SoftwarePath`.
+Bundle от другого проекта или schema 1 отклоняется до построения apply plan.
 
 ### apply-clone
 
 Основной PLC write workflow. Применяет изменения source files из
 `CLONE_PROJECT` обратно в TIA Portal через External Sources.
+
+Для безопасности write-target не выбирается как «первый PLC». `apply-clone`
+требует, чтобы открытый проект содержал ровно один `PlcSoftware`; multi-PLC
+проект сейчас отклоняется fail closed. `init-clone`/`check-clone` можно
+ограничить одним PLC через `--software-path`.
 
 Dry-run:
 
