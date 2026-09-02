@@ -14195,6 +14195,7 @@ namespace OpennessLLM
             }
 
             ValidateCloneCheckRowPaths(outDir, compareDirectory, blockRows);
+            ValidateNoConflictingCloneDiffPairs(blockRows);
 
             return new CloneCheckBundleEvidence
             {
@@ -14319,6 +14320,46 @@ namespace OpennessLLM
                 if (!string.IsNullOrWhiteSpace(currentPath))
                 {
                     EnsurePathInside(currentPath, compareRoot);
+                }
+            }
+        }
+
+        private static void ValidateNoConflictingCloneDiffPairs(List<Dictionary<string, string>> blockRows)
+        {
+            List<Dictionary<string, string>> added = (blockRows ?? new List<Dictionary<string, string>>())
+                .Where(row => EqualsIgnoreCase(GetCsvValue(row, "Status"), "added"))
+                .ToList();
+            List<Dictionary<string, string>> removed = (blockRows ?? new List<Dictionary<string, string>>())
+                .Where(row => EqualsIgnoreCase(GetCsvValue(row, "Status"), "removed"))
+                .ToList();
+
+            foreach (Dictionary<string, string> addedRow in added)
+            {
+                BlockKey currentKey = new BlockKey(
+                    FirstNonEmpty(GetCsvValue(addedRow, "CurrentSoftwarePath"), GetCsvValue(addedRow, "SoftwarePath")),
+                    FirstNonEmpty(GetCsvValue(addedRow, "CurrentNumberSpace"), GetCsvValue(addedRow, "NumberSpace")),
+                    FirstNonEmpty(GetCsvValue(addedRow, "CurrentNumber"), GetCsvValue(addedRow, "Number")),
+                    FirstNonEmpty(GetCsvValue(addedRow, "CurrentName"), GetCsvValue(addedRow, "Name")));
+                string currentRelativePath = GetCsvValue(addedRow, "CurrentRelativePath");
+
+                foreach (Dictionary<string, string> removedRow in removed)
+                {
+                    BlockKey cloneKey = new BlockKey(
+                        FirstNonEmpty(GetCsvValue(removedRow, "CloneSoftwarePath"), GetCsvValue(removedRow, "SoftwarePath")),
+                        FirstNonEmpty(GetCsvValue(removedRow, "CloneNumberSpace"), GetCsvValue(removedRow, "NumberSpace")),
+                        FirstNonEmpty(GetCsvValue(removedRow, "CloneNumber"), GetCsvValue(removedRow, "Number")),
+                        FirstNonEmpty(GetCsvValue(removedRow, "CloneName"), GetCsvValue(removedRow, "Name")));
+                    string cloneRelativePath = GetCsvValue(removedRow, "CloneRelativePath");
+                    bool relativePathMatch = SoftwarePathsCouldOverlap(currentKey.SoftwarePath, cloneKey.SoftwarePath)
+                        && !string.IsNullOrWhiteSpace(currentRelativePath)
+                        && EqualsIgnoreCase(currentRelativePath, cloneRelativePath);
+                    if (relativePathMatch || currentKey.CouldBeSameBlockAs(cloneKey))
+                    {
+                        throw new InvalidDataException(
+                            "Clone-check bundle contains conflicting added/removed rows that may identify the same block. "
+                            + "Add an explicit softwarePath sidecar or repair plc-blocks.csv, then run check-clone again. Identity: "
+                            + FirstNonEmpty(currentKey.Name, cloneKey.Name, currentRelativePath, cloneRelativePath, "unknown"));
+                    }
                 }
             }
         }
@@ -20651,7 +20692,7 @@ namespace OpennessLLM
                     return result;
                 }
 
-                string key = ReadJsonStringLiteral(trimmed, ref index, context + " key");
+                string key = ReadStrictJsonStringLiteral(trimmed, ref index, context + " key");
                 if (string.IsNullOrWhiteSpace(key) || result.ContainsKey(key))
                 {
                     throw new InvalidDataException(context + " contains an empty or duplicate property name.");
@@ -20668,7 +20709,7 @@ namespace OpennessLLM
                 string value;
                 if (index < trimmed.Length && trimmed[index] == '"')
                 {
-                    value = ReadJsonStringLiteral(trimmed, ref index, context + " value");
+                    value = ReadStrictJsonStringLiteral(trimmed, ref index, context + " value");
                 }
                 else
                 {
@@ -20711,6 +20752,86 @@ namespace OpennessLLM
                     throw new InvalidDataException(context + " has a trailing comma or incomplete property.");
                 }
             }
+        }
+
+        private static string ReadStrictJsonStringLiteral(string text, ref int index, string context)
+        {
+            if (index >= text.Length || text[index] != '"')
+            {
+                throw new InvalidDataException(context + " is not a JSON string.");
+            }
+
+            index++;
+            StringBuilder value = new StringBuilder();
+            while (index < text.Length)
+            {
+                char c = text[index++];
+                if (c == '"')
+                {
+                    return value.ToString();
+                }
+
+                if (c < 0x20)
+                {
+                    throw new InvalidDataException(context + " contains an unescaped control character.");
+                }
+
+                if (c != '\\')
+                {
+                    value.Append(c);
+                    continue;
+                }
+
+                if (index >= text.Length)
+                {
+                    throw new InvalidDataException(context + " has an incomplete escape sequence.");
+                }
+
+                char escaped = text[index++];
+                switch (escaped)
+                {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        value.Append(escaped);
+                        break;
+                    case 'b':
+                        value.Append('\b');
+                        break;
+                    case 'f':
+                        value.Append('\f');
+                        break;
+                    case 'n':
+                        value.Append('\n');
+                        break;
+                    case 'r':
+                        value.Append('\r');
+                        break;
+                    case 't':
+                        value.Append('\t');
+                        break;
+                    case 'u':
+                        if (index + 4 > text.Length)
+                        {
+                            throw new InvalidDataException(context + " has an incomplete unicode escape.");
+                        }
+
+                        string hex = text.Substring(index, 4);
+                        int code;
+                        if (!int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out code))
+                        {
+                            throw new InvalidDataException(context + " has an invalid unicode escape.");
+                        }
+
+                        value.Append((char)code);
+                        index += 4;
+                        break;
+                    default:
+                        throw new InvalidDataException(context + " has an invalid escape sequence: \\" + escaped + ".");
+                }
+            }
+
+            throw new InvalidDataException(context + " is unterminated.");
         }
 
         private static string SidecarValue(Dictionary<string, string> sidecar, string key)
@@ -22926,6 +23047,41 @@ namespace OpennessLLM
 
             AssertTrue(mismatchedBundleRejected, "a report changed after marker publication must be rejected by hash validation");
             AssertTrue(File.Exists(clonePath), "mismatched report bundle must be rejected before clone mutation");
+
+            string conflictingCurrentPath = Path.Combine(compareDir, "_root", "20_FooBlock.scl");
+            WriteTextFile(conflictingCurrentPath, "FUNCTION \"FooBlock\" : Void\nEND_FUNCTION\n");
+            checkRunId = Guid.NewGuid().ToString("N");
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                new[]
+                {
+                    "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number",
+                    "CloneSoftwarePath", "CloneName", "CloneNumberSpace", "CloneNumber", "CloneRelativePath", "ClonePath", "CloneProvenance",
+                    "CurrentSoftwarePath", "CurrentName", "CurrentNumberSpace", "CurrentNumber", "CurrentRelativePath", "CurrentPath"
+                },
+                new[]
+                {
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC", "added", "FooBlock", "FC", "20", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, clonePath, string.Empty, "PLC", "FooBlock", "FC", "20", "20_FooBlock.scl", conflictingCurrentPath },
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, string.Empty, "removed", "FooBlock", "FC", "20", string.Empty, "FooBlock", "FC", "20", "20_FooBlock.scl", clonePath, "unknown-orphaned", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty }
+                });
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Status", "Name", "NumberSpace", "Number" },
+                new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 2, 0);
+
+            bool conflictingPairRejected = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidDataException)
+            {
+                conflictingPairRejected = true;
+            }
+
+            AssertTrue(conflictingPairRejected, "an unscoped removed source paired with the same scoped added block must fail closed");
+            AssertTrue(File.Exists(clonePath), "conflicting added/removed plan must be rejected before sync mutation");
         }
 
         private static void SelfTestCloneSourceOriginProvenance(string caseDir)
@@ -22974,6 +23130,9 @@ namespace OpennessLLM
 
             WriteTextFile(sourcePath + ".meta.json", "{\"metadata\":{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}}\n");
             AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "nested sidecar origin must not grant a flat metadata exemption");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"source\\Origin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "invalid JSON escape in a trusted key must not grant explicit-new provenance");
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"}\n");
             CloneBlockRecord originWithoutScope = LoadCloneBlockManifest(cloneDir, rootDir)[0];
