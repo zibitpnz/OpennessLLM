@@ -20676,7 +20676,7 @@ namespace OpennessLLM
 
         private static Dictionary<string, string> ParseStrictFlatJsonObject(string text, string context)
         {
-            string trimmed = EmptyIfNull(text).Trim();
+            string trimmed = TrimStrictJsonWhitespace(EmptyIfNull(text));
             if (!trimmed.StartsWith("{", StringComparison.Ordinal) || !trimmed.EndsWith("}", StringComparison.Ordinal))
             {
                 throw new InvalidDataException(context + " is not a complete JSON object.");
@@ -20686,7 +20686,7 @@ namespace OpennessLLM
             int index = 1;
             while (true)
             {
-                SkipJsonWhitespace(trimmed, ref index);
+                SkipStrictJsonWhitespace(trimmed, ref index);
                 if (index == trimmed.Length - 1)
                 {
                     return result;
@@ -20698,14 +20698,14 @@ namespace OpennessLLM
                     throw new InvalidDataException(context + " contains an empty or duplicate property name.");
                 }
 
-                SkipJsonWhitespace(trimmed, ref index);
+                SkipStrictJsonWhitespace(trimmed, ref index);
                 if (index >= trimmed.Length || trimmed[index] != ':')
                 {
                     throw new InvalidDataException(context + " has a property without ':'.");
                 }
 
                 index++;
-                SkipJsonWhitespace(trimmed, ref index);
+                SkipStrictJsonWhitespace(trimmed, ref index);
                 string value;
                 if (index < trimmed.Length && trimmed[index] == '"')
                 {
@@ -20724,8 +20724,8 @@ namespace OpennessLLM
                         index++;
                     }
 
-                    string raw = trimmed.Substring(start, index - start).Trim();
-                    if (!Regex.IsMatch(raw, "^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)$"))
+                    string raw = TrimStrictJsonWhitespace(trimmed.Substring(start, index - start));
+                    if (!Regex.IsMatch(raw, "\\A(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\z"))
                     {
                         throw new InvalidDataException(context + " contains a non-primitive or malformed value.");
                     }
@@ -20734,7 +20734,7 @@ namespace OpennessLLM
                 }
 
                 result[key] = value;
-                SkipJsonWhitespace(trimmed, ref index);
+                SkipStrictJsonWhitespace(trimmed, ref index);
                 if (index == trimmed.Length - 1 && trimmed[index] == '}')
                 {
                     return result;
@@ -20746,12 +20746,43 @@ namespace OpennessLLM
                 }
 
                 index++;
-                SkipJsonWhitespace(trimmed, ref index);
+                SkipStrictJsonWhitespace(trimmed, ref index);
                 if (index >= trimmed.Length - 1)
                 {
                     throw new InvalidDataException(context + " has a trailing comma or incomplete property.");
                 }
             }
+        }
+
+        private static string TrimStrictJsonWhitespace(string value)
+        {
+            string text = value ?? string.Empty;
+            int start = 0;
+            int end = text.Length - 1;
+            while (start <= end && IsStrictJsonWhitespace(text[start]))
+            {
+                start++;
+            }
+
+            while (end >= start && IsStrictJsonWhitespace(text[end]))
+            {
+                end--;
+            }
+
+            return start > end ? string.Empty : text.Substring(start, end - start + 1);
+        }
+
+        private static void SkipStrictJsonWhitespace(string text, ref int index)
+        {
+            while (index < text.Length && IsStrictJsonWhitespace(text[index]))
+            {
+                index++;
+            }
+        }
+
+        private static bool IsStrictJsonWhitespace(char value)
+        {
+            return value == ' ' || value == '\t' || value == '\r' || value == '\n';
         }
 
         private static string ReadStrictJsonStringLiteral(string text, ref int index, string context)
@@ -23142,6 +23173,9 @@ namespace OpennessLLM
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"extra\":1\u0661}\n");
             AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "Unicode decimal digits must not be accepted in a JSON number");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\u00A0\"softwarePath\":\"PLC\"}\n");
+            AssertEqual("unknown-orphaned", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "non-JSON Unicode whitespace must invalidate the entire provenance sidecar");
 
             WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\"}\n");
             CloneBlockRecord originWithoutScope = LoadCloneBlockManifest(cloneDir, rootDir)[0];
