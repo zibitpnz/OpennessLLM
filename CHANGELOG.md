@@ -31,6 +31,10 @@ All notable changes to OpennessLLM are recorded in this file.
   new-block exemption, including when `plc-blocks.csv` is missing or partial.
   Manifest rows also retain `tracked-baseline` provenance when their `_root`
   source file is missing, so deleting the source cannot erase tracking history.
+  Normal exportable matches still classify that missing file as an intentional
+  clone-side deletion; retained metadata is emitted only when needed as
+  ambiguity evidence for an unsupported live block. A completed deletion,
+  including the last block in a project, is accepted as a clean after-check.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
   software scope fails closed where identities could overlap. Loose sources do
   not inherit the first manifest software path, and explicit-new provenance

@@ -13751,6 +13751,11 @@ namespace OpennessLLM
                     || TryGetUniqueCrossScopeRelativeMatch(current, cloneByUnscopedRelative, uniqueCurrentUnscopedRelativePaths, out clone))
                 {
                     usedCloneBlocks.Add(clone);
+                    if (AddCloneDeletedDiffIfSourceMissing(diffs, current, clone))
+                    {
+                        continue;
+                    }
+
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     bool metadataChanged = !EqualsIgnoreCase(current.Name, clone.Name)
                         || !EqualsIgnoreCase(EmptyIfNull(current.GroupPath), EmptyIfNull(clone.GroupPath))
@@ -13780,6 +13785,11 @@ namespace OpennessLLM
                 if (!string.IsNullOrEmpty(identity) && cloneByIdentity.TryGetValue(identity, out clone))
                 {
                     usedCloneBlocks.Add(clone);
+                    if (AddCloneDeletedDiffIfSourceMissing(diffs, current, clone))
+                    {
+                        continue;
+                    }
+
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone relative path was '" + clone.RelativePath + "', current relative path is '" + current.RelativePath + "'.";
@@ -13796,6 +13806,11 @@ namespace OpennessLLM
                 if (!string.IsNullOrEmpty(numberIdentity) && cloneByNumberIdentity.TryGetValue(numberIdentity, out clone))
                 {
                     usedCloneBlocks.Add(clone);
+                    if (AddCloneDeletedDiffIfSourceMissing(diffs, current, clone))
+                    {
+                        continue;
+                    }
+
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone block '" + clone.Name + "' at '" + clone.RelativePath + "' matches current block '" + current.Name + "' at '" + current.RelativePath + "' by type and number.";
@@ -13818,10 +13833,66 @@ namespace OpennessLLM
                     continue;
                 }
 
+                if (!CloneSourceFileExists(clone) && !MissingCloneRecordNeededForSourceBlockerEvidence(clone, diffs))
+                {
+                    // Keep the manifest record available during matching, but do
+                    // not turn stale metadata into a clone-only create action.
+                    // If neither an exportable live block nor an ambiguous visual
+                    // block remains, the absent source represents a completed
+                    // clone-side deletion.
+                    continue;
+                }
+
                 diffs.Add(CloneDiff("removed", null, clone, "Block exists in clone but not in current TIA project."));
             }
 
             return diffs.OrderBy(x => x.Status).ThenBy(x => x.GroupPath).ThenBy(x => SafeInt(x.Number)).ThenBy(x => x.Name).ToList();
+        }
+
+        private static bool AddCloneDeletedDiffIfSourceMissing(List<CloneDiffRecord> diffs, CloneBlockRecord current, CloneBlockRecord clone)
+        {
+            if (CloneSourceFileExists(clone))
+            {
+                return false;
+            }
+
+            diffs.Add(CloneDiff(
+                "added",
+                current,
+                null,
+                "The tracked clone source file is missing. The exportable current block is treated as deleted from clone."));
+            return true;
+        }
+
+        private static bool CloneSourceFileExists(CloneBlockRecord clone)
+        {
+            return clone != null
+                && !string.IsNullOrWhiteSpace(clone.ClonePath)
+                && File.Exists(clone.ClonePath);
+        }
+
+        private static bool MissingCloneRecordNeededForSourceBlockerEvidence(CloneBlockRecord clone, List<CloneDiffRecord> diffs)
+        {
+            RemovedCloneRef removed = new RemovedCloneRef
+            {
+                Key = new BlockKey(
+                    clone == null ? string.Empty : clone.SoftwarePath,
+                    clone == null ? string.Empty : clone.NumberSpace,
+                    clone == null ? string.Empty : clone.Number,
+                    clone == null ? string.Empty : clone.Name),
+                ExplicitNewLocalSource = clone != null && EqualsIgnoreCase(clone.Provenance, "explicit-new-local-source"),
+            };
+            List<RemovedCloneRef> removedRows = new List<RemovedCloneRef> { removed };
+            return (diffs ?? new List<CloneDiffRecord>())
+                .Where(x => x != null && EqualsIgnoreCase(x.Status, "source-blocked-current-only"))
+                .Any(x => SourceBlockedStatusBlocksWrite(
+                    x.Status,
+                    new BlockKey(
+                        FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
+                        FirstNonEmpty(x.CurrentNumberSpace, x.NumberSpace),
+                        FirstNonEmpty(x.CurrentNumber, x.Number),
+                        FirstNonEmpty(x.CurrentName, x.Name)),
+                    removedRows));
         }
 
         private static CloneBlockRecord FindCloneMatchForCurrent(
@@ -17110,7 +17181,10 @@ namespace OpennessLLM
                     afterSourceBlockerCount = BlockingSourceBlockerCount(afterRows, afterSourceBlockers);
                 }
 
-                afterCheckAccepted = afterRows.Count > 0 && dirtyRows == 0 && afterSourceBlockerCount == 0;
+                // A successful deletion may legitimately leave a project with
+                // zero block rows. Bundle integrity, not a nonzero row count,
+                // proves that the after-check completed.
+                afterCheckAccepted = dirtyRows == 0 && afterSourceBlockerCount == 0;
                 AddApplyCloneGate(
                     gates,
                     "after-write",
@@ -23316,6 +23390,55 @@ namespace OpennessLLM
             AssertTrue(missingTracked.Count == 1, "a manifest-tracked row must remain represented when its _root source is missing");
             AssertEqual("tracked-baseline", missingTracked[0].Provenance, "missing tracked source must retain tracked-baseline provenance");
             AssertTrue(!File.Exists(missingTracked[0].ClonePath), "tracked-source regression fixture must actually be missing");
+
+            string trackedCurrentPath = Path.Combine(caseDir, "TRACKED_CURRENT", missingTracked[0].RelativePath);
+            WriteTextFile(trackedCurrentPath, "FUNCTION \"Widget_Old\" : Void\nEND_FUNCTION\n");
+            CloneBlockRecord trackedCurrent = new CloneBlockRecord
+            {
+                SoftwarePath = missingTracked[0].SoftwarePath,
+                GroupPath = missingTracked[0].GroupPath,
+                Name = missingTracked[0].Name,
+                Number = missingTracked[0].Number,
+                NumberSpace = missingTracked[0].NumberSpace,
+                ProgrammingLanguage = missingTracked[0].ProgrammingLanguage,
+                BlockType = missingTracked[0].BlockType,
+                TypeName = missingTracked[0].TypeName,
+                SourceTypeName = missingTracked[0].SourceTypeName,
+                RelativePath = missingTracked[0].RelativePath,
+                ClonePath = missingTracked[0].ClonePath,
+                CurrentPath = trackedCurrentPath,
+                ExportStatus = "ok",
+            };
+            List<CloneDiffRecord> cloneDeletionDiffs = BuildCloneBlockDiffs(
+                missingTracked,
+                new List<CloneBlockRecord> { trackedCurrent });
+            AssertTrue(cloneDeletionDiffs.Count == 1 && EqualsIgnoreCase(cloneDeletionDiffs[0].Status, "added"), "a tracked missing source with an exportable live block must remain a clone-side deletion action");
+            AssertTrue(!cloneDeletionDiffs.Any(x => EqualsIgnoreCase(x.Status, "changed")), "a tracked missing source must not be misclassified as changed");
+
+            List<CloneDiffRecord> completedDeletionDiffs = BuildCloneBlockDiffs(
+                missingTracked,
+                new List<CloneBlockRecord>());
+            AssertTrue(completedDeletionDiffs.Count == 0, "a missing tracked source with no remaining live block must be clean after deletion");
+
+            CloneBlockRecord ambiguousVisualCurrent = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC",
+                Name = "Widget_Visual_Renamed",
+                Number = "99",
+                NumberSpace = "FC",
+                ProgrammingLanguage = "LAD",
+                BlockType = "FC",
+                TypeName = "Siemens.Engineering.SW.Blocks.FC",
+                RelativePath = "99_Widget_Visual_Renamed.lad",
+                ClonePath = Path.Combine(trackedRootDir, "99_Widget_Visual_Renamed.lad"),
+                ExportStatus = "unsupported-language",
+            };
+            List<CloneDiffRecord> missingTrackedVisualDiffs = BuildCloneBlockDiffs(
+                missingTracked,
+                new List<CloneBlockRecord> { ambiguousVisualCurrent });
+            AssertTrue(missingTrackedVisualDiffs.Any(x => EqualsIgnoreCase(x.Status, "removed")), "missing tracked manifest evidence must remain present when an unmatched visual block could be the converted source");
+            AssertTrue(BlockingSourceBlockedDiffCount(missingTrackedVisualDiffs) > 0, "missing tracked provenance must still block an ambiguous renamed and renumbered visual block");
+
             string unscopedLoosePath = Path.Combine(trackedRootDir, "30_Unscoped_New.scl");
             WriteTextFile(unscopedLoosePath, "FUNCTION \"Unscoped_New\" : Void\nEND_FUNCTION\n");
             List<CloneBlockRecord> mixedSoftwareRecords = LoadCloneBlockManifest(trackedCloneDir, trackedRootDir);
