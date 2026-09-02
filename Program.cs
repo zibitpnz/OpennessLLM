@@ -14250,6 +14250,35 @@ namespace OpennessLLM
         // block report AND cross-check the dedicated report, then fail closed on
         // any disagreement, so a partial or stale main report cannot hide a real
         // blocker.
+        private static bool DedicatedSourceBlockerRowBlocksWrite(Dictionary<string, string> row)
+        {
+            if (row == null)
+            {
+                return true;
+            }
+
+            string status = GetCsvValue(row, "Status");
+            string severity = GetCsvValue(row, "Severity");
+            if (!IsSourceBlockedStatus(status))
+            {
+                return true;
+            }
+
+            if (EqualsIgnoreCase(severity, "error"))
+            {
+                return true;
+            }
+
+            if (!EqualsIgnoreCase(severity, "warning"))
+            {
+                // Blank, missing, or unknown severity is malformed evidence.
+                return true;
+            }
+
+            // Only current-only visual blocks may be informational warnings.
+            return !IsInformationalSourceBlockedCandidate(status);
+        }
+
         private static int DedicatedReportBlockerCount(List<Dictionary<string, string>> sourceBlockerRows)
         {
             if (sourceBlockerRows == null || sourceBlockerRows.Count == 0)
@@ -14257,16 +14286,7 @@ namespace OpennessLLM
                 return 0;
             }
 
-            bool hasSeverity = sourceBlockerRows.Any(x => x.ContainsKey("Severity"));
-            if (!hasSeverity)
-            {
-                // Older report format without severity: fail closed on every row.
-                return sourceBlockerRows.Count(x => IsSourceBlockedStatus(GetCsvValue(x, "Status")));
-            }
-
-            return sourceBlockerRows.Count(x =>
-                IsSourceBlockedStatus(GetCsvValue(x, "Status"))
-                && EqualsIgnoreCase(GetCsvValue(x, "Severity"), "error"));
+            return sourceBlockerRows.Count(DedicatedSourceBlockerRowBlocksWrite);
         }
 
         private static int BlockingSourceBlockerCount(
@@ -14319,10 +14339,14 @@ namespace OpennessLLM
             return "Fix the source export problem in TIA, then run check-clone again.";
         }
 
-        private static void EnsureNoSourceBlockersForWrite(string commandName, List<Dictionary<string, string>> blockRows)
+        private static void EnsureNoSourceBlockersForWrite(
+            string commandName,
+            List<Dictionary<string, string>> blockRows,
+            List<Dictionary<string, string>> sourceBlockerRows)
         {
             List<Dictionary<string, string>> blockers = BlockingSourceBlockedRows(blockRows);
-            if (blockers.Count == 0)
+            int blockerCount = BlockingSourceBlockerCount(blockRows, sourceBlockerRows);
+            if (blockerCount == 0)
             {
                 return;
             }
@@ -14330,7 +14354,15 @@ namespace OpennessLLM
             string first = blockers
                 .Select(x => FirstNonEmpty(GetCsvValue(x, "CurrentName"), GetCsvValue(x, "CloneName"), GetCsvValue(x, "Name")))
                 .FirstOrDefault();
-            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone report contains " + blockers.Count + " blocking source-blocked block(s) (Severity=error in clone-check-source-blockers.csv). First blocker: " + first + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; or a clone-tracked block of the same number space went missing while an unmatched visual block is present (ambiguous - it may be the same block renamed and renumbered). Resolve in TIA (convert the block back to STL/SCL, delete the visual block before adding its replacement), or - if a clone-tracked block was intentionally removed and the visual block is unrelated - delete that block's stale source file from CLONE_PROJECT\\_root, then run check-clone again. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
+            if (string.IsNullOrWhiteSpace(first) && sourceBlockerRows != null)
+            {
+                first = sourceBlockerRows
+                    .Where(DedicatedSourceBlockerRowBlocksWrite)
+                    .Select(x => FirstNonEmpty(GetCsvValue(x, "CurrentName"), GetCsvValue(x, "CloneName"), GetCsvValue(x, "Name")))
+                    .FirstOrDefault();
+            }
+
+            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone reports contain " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a clone-tracked block of the same number space went missing while an unmatched visual block is present; or clone-check-source-blockers.csv is malformed/inconsistent. Resolve the TIA/clone conflict or regenerate both reports with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
         }
 
         private static void WriteStatusCounts(StreamWriter writer, string label, IEnumerable<string> statuses)
@@ -14360,6 +14392,7 @@ namespace OpennessLLM
             }
 
             string blockReportPath = Path.Combine(outDir, "clone-check-blocks.csv");
+            string sourceBlockerReportPath = Path.Combine(outDir, "clone-check-source-blockers.csv");
             if (!File.Exists(blockReportPath))
             {
                 throw new FileNotFoundException("Clone check block report was not found. Run check-clone first.", blockReportPath);
@@ -14377,7 +14410,8 @@ namespace OpennessLLM
             string reportPath = Path.Combine(outDir, "sync-clone-report.csv");
             List<string[]> report = new List<string[]>();
             List<Dictionary<string, string>> blockRows = ReadCsv(blockReportPath);
-            EnsureNoSourceBlockersForWrite("sync-clone", blockRows);
+            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            EnsureNoSourceBlockersForWrite("sync-clone", blockRows, sourceBlockerRows);
 
             int updated = 0;
             int added = 0;
@@ -16358,7 +16392,7 @@ namespace OpennessLLM
                 true,
                 true,
                 false,
-                sourceBlockerCount == 0 ? "Latest clone-check report contains no source-blocked PLC rows." : "Latest clone-check report contains source-blocked PLC rows; apply-clone is blocked.",
+                sourceBlockerCount == 0 ? "Latest clone-check reports contain no blocking source-blocked PLC rows; informational warnings do not gate this apply." : "Latest clone-check reports contain blocking or malformed source-blocker evidence; apply-clone is blocked.",
                 sourceBlockerReportPath,
                 "source blockers=0",
                 "source blockers=" + sourceBlockerCount.ToString(CultureInfo.InvariantCulture));
@@ -16366,7 +16400,7 @@ namespace OpennessLLM
             {
                 WriteApplyClonePreflightReports(outDir, plan, preflight.Issues);
                 WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
-                EnsureNoSourceBlockersForWrite("apply-clone", allRows);
+                EnsureNoSourceBlockersForWrite("apply-clone", allRows, sourceBlockerRows);
             }
 
             if (!CanWriteApplyClone(gates))
@@ -16623,6 +16657,7 @@ namespace OpennessLLM
             string outDir = ResolveCloneProjectDirectory(options.OutDir);
             string rootDir = Path.Combine(outDir, "_root");
             string blockReportPath = Path.Combine(outDir, "clone-check-blocks.csv");
+            string sourceBlockerReportPath = Path.Combine(outDir, "clone-check-source-blockers.csv");
             if (!Directory.Exists(rootDir))
             {
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
@@ -16634,7 +16669,8 @@ namespace OpennessLLM
             }
 
             List<Dictionary<string, string>> allRows = ReadCsv(blockReportPath);
-            EnsureNoSourceBlockersForWrite("apply-clone", allRows);
+            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            EnsureNoSourceBlockersForWrite("apply-clone", allRows, sourceBlockerRows);
 
             List<Dictionary<string, string>> rows = allRows
                 .Where(x => EqualsIgnoreCase(GetCsvValue(x, "Status"), "changed")
@@ -21241,6 +21277,7 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "source-blocker-after-write-and-sync", SelfTestSourceBlockerAfterWriteAndSync);
             RunSelfTestCase(results, outDir, "source-blocker-tracked-identity-change", SelfTestSourceBlockerTrackedIdentityChange);
             RunSelfTestCase(results, outDir, "source-blocker-report-cross-check", SelfTestSourceBlockerReportCrossCheck);
+            RunSelfTestCase(results, outDir, "sync-clone-source-blocker-cross-report-gate", SelfTestSyncCloneSourceBlockerCrossReportGate);
             RunSelfTestCase(results, outDir, "apply-clone-canonical-source-formatting", SelfTestApplyCloneCanonicalSourceFormatting);
 
             WriteSelfTestReports(outDir, results);
@@ -21989,9 +22026,17 @@ namespace OpennessLLM
 
         private static bool SourceBlockerGateThrows(string commandName, List<Dictionary<string, string>> rows)
         {
+            return SourceBlockerGateThrows(commandName, rows, new List<Dictionary<string, string>>());
+        }
+
+        private static bool SourceBlockerGateThrows(
+            string commandName,
+            List<Dictionary<string, string>> rows,
+            List<Dictionary<string, string>> sourceBlockerRows)
+        {
             try
             {
-                EnsureNoSourceBlockersForWrite(commandName, rows);
+                EnsureNoSourceBlockersForWrite(commandName, rows, sourceBlockerRows);
                 return false;
             }
             catch (InvalidOperationException)
@@ -22013,7 +22058,7 @@ namespace OpennessLLM
                 SourceBlockerTestRow("source-blocked-current-only", "FB", "1", "Main_Safety_RTG1"),
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "6", "SAFETY_COMMON"),
             };
-            EnsureNoSourceBlockersForWrite("apply-clone", failSafe);
+            EnsureNoSourceBlockersForWrite("apply-clone", failSafe, noReport);
             AssertTrue(BlockingSourceBlockerCount(failSafe, noReport) == 0, "fail-safe current-only rows must not block");
             AssertTrue(InformationalSourceBlockerCount(failSafe) == 3, "fail-safe current-only rows must be counted as informational");
 
@@ -22106,7 +22151,7 @@ namespace OpennessLLM
                 SourceBlockerTestRow("removed", "FC", "31", "Widget_New", "file-scan"),
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "4", "KUKA_SAFETY_IO"),
             };
-            EnsureNoSourceBlockersForWrite("apply-clone", newAndFailSafe);
+            EnsureNoSourceBlockersForWrite("apply-clone", newAndFailSafe, new List<Dictionary<string, string>>());
             AssertTrue(BlockingSourceBlockerCount(newAndFailSafe, new List<Dictionary<string, string>>()) == 0, "new clone-only block must not be blocked by an unrelated fail-safe block");
 
             // But a new clone-only file that reuses the number of a live visual
@@ -22154,7 +22199,7 @@ namespace OpennessLLM
                 SourceBlockerTestRow("removed", "FB", "20", "FooFb"),
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "6", "SAFETY_COMMON"),
             };
-            EnsureNoSourceBlockersForWrite("apply-clone", differentSpace);
+            EnsureNoSourceBlockersForWrite("apply-clone", differentSpace, new List<Dictionary<string, string>>());
             AssertTrue(BlockingSourceBlockerCount(differentSpace, new List<Dictionary<string, string>>()) == 0, "a missing tracked block of a different number space must not block an unrelated fail-safe block");
         }
 
@@ -22201,6 +22246,82 @@ namespace OpennessLLM
             };
             AssertTrue(BlockingSourceBlockerCount(benignBlockRows, noSeverity) == 1,
                 "a dedicated report without a Severity column must fail closed");
+
+            List<Dictionary<string, string>> blankSeverity = new List<Dictionary<string, string>>
+            {
+                new Dictionary<string, string>
+                {
+                    { "Severity", string.Empty }, { "Status", "source-blocked-current-only" },
+                    { "Name", "BlankSeverity" }, { "NumberSpace", "FC" }, { "Number", "7" },
+                },
+            };
+            AssertTrue(BlockingSourceBlockerCount(benignBlockRows, blankSeverity) == 1,
+                "a dedicated report with blank Severity must fail closed");
+
+            List<Dictionary<string, string>> unknownSeverity = new List<Dictionary<string, string>>
+            {
+                new Dictionary<string, string>
+                {
+                    { "Severity", "info" }, { "Status", "source-blocked-current-only" },
+                    { "Name", "UnknownSeverity" }, { "NumberSpace", "FC" }, { "Number", "8" },
+                },
+            };
+            AssertTrue(BlockingSourceBlockerCount(benignBlockRows, unknownSeverity) == 1,
+                "a dedicated report with unknown Severity must fail closed");
+        }
+
+        private static void SelfTestSyncCloneSourceBlockerCrossReportGate(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string compareRoot = Path.Combine(cloneDir, "_compare", "current-self-test", "_root");
+            string clonePath = Path.Combine(rootDir, "10_FB_Logic.scl");
+            string currentPath = Path.Combine(compareRoot, "10_FB_Logic.scl");
+            WriteTextFile(clonePath, "clone-before" + Environment.NewLine);
+            WriteTextFile(currentPath, "current-after" + Environment.NewLine);
+
+            WriteCsv(
+                Path.Combine(cloneDir, "clone-check-blocks.csv"),
+                new[]
+                {
+                    "Status", "Name", "NumberSpace", "Number",
+                    "CloneName", "CloneNumberSpace", "CloneNumber",
+                    "CurrentName", "CurrentNumberSpace", "CurrentNumber",
+                    "ClonePath", "CurrentPath", "CloneProvenance"
+                },
+                new[]
+                {
+                    new[]
+                    {
+                        "changed", "FB_Logic", "FB", "10",
+                        "FB_Logic", "FB", "10",
+                        "FB_Logic", "FB", "10",
+                        clonePath, currentPath, "manifest"
+                    }
+                });
+
+            WriteCsv(
+                Path.Combine(cloneDir, "clone-check-source-blockers.csv"),
+                new[] { "Severity", "Status", "Name", "NumberSpace", "Number" },
+                new[]
+                {
+                    new[] { "error", "source-blocked-language-converted", "FB_Was_Scl", "FB", "20" }
+                });
+
+            bool blocked = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidOperationException ex)
+            {
+                blocked = ex.Message.IndexOf("sync-clone is blocked", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+
+            AssertTrue(blocked, "sync-clone must consume the dedicated source-blocker report and fail closed on Severity=error.");
+            AssertEqual("clone-before" + Environment.NewLine, File.ReadAllText(clonePath, Encoding.UTF8), "sync-clone gate must fire before clone source mutation");
+            AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-backups")), "sync-clone gate must fire before backup/mutation starts");
+            AssertTrue(!File.Exists(Path.Combine(cloneDir, "sync-clone-report.csv")), "sync-clone gate must fire before a success report is written");
         }
 
         private static void SelfTestApplyCloneGatesFinalDuplicateNumber(string caseDir)

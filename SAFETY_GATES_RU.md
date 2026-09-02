@@ -311,6 +311,13 @@ clone-only блок, сам по себе не делает несвязанны
 колонки — fail closed), берёт максимум — неполный/устаревший основной отчёт не
 спрячет блокер.
 
+`apply-clone` и `sync-clone` используют одну и ту же cross-report проверку.
+`sync-clone` выполняет её до создания backup, изменения source-файлов,
+manifest или sync report. Пустой, отсутствующий или неизвестный `Severity`, а
+также malformed строка dedicated report блокируют операцию. Неблокирующим
+считается только явный `Severity=warning` для
+`source-blocked-current-only`.
+
 Несопоставимые pre-existing LAD / F_LAD блоки (fail-safe и т.п.) не блокируют —
 это позволяет вести STL/SCL-правки в таких проектах. В
 `clone-check-source-blockers.csv` они идут с `Severity=warning`, блокирующие —

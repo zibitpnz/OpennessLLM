@@ -25,6 +25,12 @@ All notable changes to OpennessLLM are recorded in this file.
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
   reports without the column fail closed), taking the max — a partial or stale
   main report can no longer hide a blocker.
+- `sync-clone` now loads the dedicated source-blocker report and uses the same
+  cross-report gate as `apply-clone`; the gate runs before any clone file,
+  backup, manifest, or sync report mutation.
+- Missing, blank, or unknown `Severity` values and malformed dedicated
+  source-blocker rows fail closed. Only an explicit `warning` on
+  `source-blocked-current-only` is non-blocking.
 - `clone-check-source-blockers.csv` emits `Severity=warning` for a non-blocking
   `source-blocked-current-only` row and `Severity=error` for blocking rows.
 - `status` / `check-all` report a separate `informationalSourceBlockers` count
@@ -32,8 +38,9 @@ All notable changes to OpennessLLM are recorded in this file.
 - Added offline regression tests `source-blocker-classification-shared`,
   `source-blocker-report-severity`, `source-blocker-after-write-and-sync`,
   `source-blocker-tracked-identity-change` (incl. both-name-and-number change),
-  and `source-blocker-report-cross-check`.
-- Verification result: `self-test` passed `33/33`.
+  `source-blocker-report-cross-check`, and
+  `sync-clone-source-blocker-cross-report-gate`.
+- Verification result: `self-test` passed `34/34`.
 
 ## 0.12.3 - 2026-08-27
 
