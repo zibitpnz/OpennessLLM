@@ -41,7 +41,9 @@ All notable changes to OpennessLLM are recorded in this file.
   numbers use their case-sensitive, ASCII-digit standard grammar.
 - A structurally conflicting `added` + `removed` pair that may identify the
   same block (including an unscoped orphan paired with a scoped live block) now
-  invalidates the evidence bundle before apply/sync mutation.
+  invalidates the evidence bundle before apply/sync mutation. Distinct report
+  rows that touch the same physical `_root` path are also rejected regardless
+  of `SoftwarePath`.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
   reports without the column fail closed), after bundle integrity validation.

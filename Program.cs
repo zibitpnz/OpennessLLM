@@ -14195,6 +14195,7 @@ namespace OpennessLLM
             }
 
             ValidateCloneCheckRowPaths(outDir, compareDirectory, blockRows);
+            ValidateNoConflictingClonePhysicalPaths(outDir, compareDirectory, blockRows);
             ValidateNoConflictingCloneDiffPairs(blockRows);
 
             return new CloneCheckBundleEvidence
@@ -14350,16 +14351,67 @@ namespace OpennessLLM
                         FirstNonEmpty(GetCsvValue(removedRow, "CloneNumber"), GetCsvValue(removedRow, "Number")),
                         FirstNonEmpty(GetCsvValue(removedRow, "CloneName"), GetCsvValue(removedRow, "Name")));
                     string cloneRelativePath = GetCsvValue(removedRow, "CloneRelativePath");
-                    bool relativePathMatch = SoftwarePathsCouldOverlap(currentKey.SoftwarePath, cloneKey.SoftwarePath)
-                        && !string.IsNullOrWhiteSpace(currentRelativePath)
+                    bool relativePathMatch = !string.IsNullOrWhiteSpace(currentRelativePath)
                         && EqualsIgnoreCase(currentRelativePath, cloneRelativePath);
                     if (relativePathMatch || currentKey.CouldBeSameBlockAs(cloneKey))
                     {
                         throw new InvalidDataException(
                             "Clone-check bundle contains conflicting added/removed rows that may identify the same block. "
-                            + "Add an explicit softwarePath sidecar or repair plc-blocks.csv, then run check-clone again. Identity: "
+                            + "Repair the colliding clone path, softwarePath sidecar, or plc-blocks.csv, then run check-clone again. Identity: "
                             + FirstNonEmpty(currentKey.Name, cloneKey.Name, currentRelativePath, cloneRelativePath, "unknown"));
                     }
+                }
+            }
+        }
+
+        private static void ValidateNoConflictingClonePhysicalPaths(string outDir, string compareDirectory, List<Dictionary<string, string>> blockRows)
+        {
+            string rootDir = Path.Combine(Path.GetFullPath(outDir), "_root");
+            string compareRoot = Path.Combine(compareDirectory, "_root");
+            Dictionary<string, string> pathOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            int rowIndex = 0;
+
+            foreach (Dictionary<string, string> row in blockRows ?? new List<Dictionary<string, string>>())
+            {
+                rowIndex++;
+                string status = GetCsvValue(row, "Status");
+                string clonePath = GetCsvValue(row, "ClonePath");
+                string currentPath = GetCsvValue(row, "CurrentPath");
+                List<string> touchedPaths = new List<string>();
+
+                if (EqualsIgnoreCase(status, "removed"))
+                {
+                    touchedPaths.Add(clonePath);
+                }
+                else if (!EqualsIgnoreCase(status, "export-error") && !IsSourceBlockedStatus(status))
+                {
+                    string destinationPath = DetermineSyncDestinationPath(status, clonePath, currentPath, compareRoot, rootDir);
+                    touchedPaths.Add(destinationPath);
+                    if ((EqualsIgnoreCase(status, "moved-or-renamed") || EqualsIgnoreCase(status, "moved-or-renamed-and-changed"))
+                        && !EqualsIgnoreCase(clonePath, destinationPath))
+                    {
+                        touchedPaths.Add(clonePath);
+                    }
+                }
+
+                string owner = "row " + rowIndex.ToString(CultureInfo.InvariantCulture)
+                    + " (" + FirstNonEmpty(status, "unknown-status")
+                    + ", " + FirstNonEmpty(GetCsvValue(row, "Name"), "unknown-block")
+                    + ", " + FirstNonEmpty(GetCsvValue(row, "SoftwarePath"), GetCsvValue(row, "CurrentSoftwarePath"), GetCsvValue(row, "CloneSoftwarePath"), "unscoped") + ")";
+                foreach (string path in touchedPaths
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(Path.GetFullPath)
+                    .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    string previousOwner;
+                    if (pathOwners.TryGetValue(path, out previousOwner))
+                    {
+                        throw new InvalidDataException(
+                            "Clone-check bundle contains multiple block rows that touch the same physical _root path regardless of SoftwarePath: "
+                            + path + ". Conflicting rows: " + previousOwner + " and " + owner + ".");
+                    }
+
+                    pathOwners[path] = owner;
                 }
             }
         }
@@ -23113,6 +23165,39 @@ namespace OpennessLLM
 
             AssertTrue(conflictingPairRejected, "an unscoped removed source paired with the same scoped added block must fail closed");
             AssertTrue(File.Exists(clonePath), "conflicting added/removed plan must be rejected before sync mutation");
+
+            checkRunId = Guid.NewGuid().ToString("N");
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                new[]
+                {
+                    "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number",
+                    "CloneSoftwarePath", "CloneName", "CloneNumberSpace", "CloneNumber", "CloneRelativePath", "ClonePath", "CloneProvenance",
+                    "CurrentSoftwarePath", "CurrentName", "CurrentNumberSpace", "CurrentNumber", "CurrentRelativePath", "CurrentPath"
+                },
+                new[]
+                {
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC_1", "added", "Live_A", "FC", "20", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, clonePath, string.Empty, "PLC_1", "Live_A", "FC", "20", "20_FooBlock.scl", conflictingCurrentPath },
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC_2", "removed", "Old_B", "FC", "99", "PLC_2", "Old_B", "FC", "99", "20_FooBlock.scl", clonePath, "tracked-baseline", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty }
+                });
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Status", "Name", "NumberSpace", "Number" },
+                new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 2, 0);
+
+            bool crossSoftwarePathCollisionRejected = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidDataException)
+            {
+                crossSoftwarePathCollisionRejected = true;
+            }
+
+            AssertTrue(crossSoftwarePathCollisionRejected, "an added and removed row that share one physical _root path must fail closed even across different SoftwarePath values");
+            AssertTrue(File.Exists(clonePath), "cross-software physical path collision must be rejected before sync mutation");
         }
 
         private static void SelfTestCloneSourceOriginProvenance(string caseDir)
