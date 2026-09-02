@@ -410,8 +410,11 @@ write workflow. Он получает export/source blocker status.
 4. Читает clone metadata baseline.
 5. Читает текущие files в CLONE_PROJECT\_root.
 6. Сравнивает baseline, live TIA и clone files.
-7. Пишет clone-check-blocks.csv и clone-check-summary.txt.
-8. Обновляет machine-readable metadata для будущих lookup/gates.
+7. Пишет block/group/source-blocker/summary reports во временный staging.
+8. Atomic replace публикует отчёты, затем последним записывает
+   `clone-check-bundle.json` с schema/run ID, row counts, SHA-256 и точным
+   compare directory.
+9. `apply-clone` / `sync-clone` принимают только полностью проверенный bundle.
 ```
 
 Типовые статусы:
@@ -551,7 +554,14 @@ autoNumber
 programmingLanguage
 name
 instanceOfName
+softwarePath
+sourceOrigin
 ```
+
+Для source, которого нет в `plc-blocks.csv`, безопасное происхождение по
+умолчанию — `unknown-orphaned`. Только точное sidecar-значение
+`sourceOrigin=explicit-new-local-source` подтверждает намеренно добавленный
+новый локальный source; потеря или неполнота manifest не даёт этого исключения.
 
 Если sidecar отсутствует, numeric prefix filename может означать manual block
 number.

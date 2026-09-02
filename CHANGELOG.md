@@ -4,6 +4,14 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- `check-clone` now publishes its block, group, source-blocker, and summary
+  reports as one fail-closed evidence bundle. `clone-check-bundle.json` is
+  committed last and binds a schema version, `CheckRunId`, row counts, hashes,
+  and the exact compare directory. `apply-clone` / `sync-clone` reject missing,
+  interrupted, tampered, or cross-run bundles before mutation.
+- `sync-clone` no longer guesses the newest `_compare` directory; it consumes
+  the directory bound to the validated bundle and verifies current-source
+  hashes before copying.
 - Source-blocker write classification is now a single shared helper
   (`SourceBlockedStatusBlocksWrite` / `BlockingSourceBlockedRows` /
   `BlockingSourceBlockerCount`) used by every pre-write gate, the after-write
@@ -12,25 +20,27 @@ All notable changes to OpennessLLM are recorded in this file.
   longer disagree about whether the project is writable.
 - A `source-blocked-*` row blocks `apply-clone` / `sync-clone` unless it is
   `source-blocked-current-only` **and** (a) no `removed` clone row could be the
-  same block by number or name, **and** (b) no `removed` clone row the clone
-  actually tracked (new `CloneProvenance` column: `manifest` vs `file-scan`)
-  shares its block number space. (b) fails closed on a tracked block that
+  same block by number or name, **and** (b) no `removed` clone row without the
+  exact durable `explicit-new-local-source` sidecar origin shares its block
+  number space. `CloneProvenance` is now `tracked-baseline`,
+  `explicit-new-local-source`, or fail-closed `unknown-orphaned`. (b) fails
+  closed on a tracked block that
   changed both name and number before conversion. `source-blocked-language-converted`,
   `source-blocked-export-error`, and any unknown `source-blocked-*` status always
-  block. A `removed` row for a loose hand-placed `_root` file (`file-scan`) is a
-  new clone-only block and does not by itself make an unrelated visual block
-  blocking.
-- `clone-check-blocks.csv` gains a `CloneProvenance` column.
+  block. A loose source without the exact origin assertion receives no
+  new-block exemption, including when `plc-blocks.csv` is missing or partial.
+- Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
+  software scope fails closed where identities could overlap.
 - `BlockingSourceBlockerCount` recomputes from the full block report AND
   cross-checks `clone-check-source-blockers.csv` (`Severity=error` rows; older
-  reports without the column fail closed), taking the max — a partial or stale
-  main report can no longer hide a blocker.
+  reports without the column fail closed), after bundle integrity validation.
 - `sync-clone` now loads the dedicated source-blocker report and uses the same
   cross-report gate as `apply-clone`; the gate runs before any clone file,
   backup, manifest, or sync report mutation.
 - Missing, blank, or unknown `Severity` values and malformed dedicated
   source-blocker rows fail closed. Only an explicit `warning` on
-  `source-blocked-current-only` is non-blocking.
+  `source-blocked-current-only` with usable software/block identity is
+  non-blocking.
 - `clone-check-source-blockers.csv` emits `Severity=warning` for a non-blocking
   `source-blocked-current-only` row and `Severity=error` for blocking rows.
 - `status` / `check-all` report a separate `informationalSourceBlockers` count
@@ -39,8 +49,12 @@ All notable changes to OpennessLLM are recorded in this file.
   `source-blocker-report-severity`, `source-blocker-after-write-and-sync`,
   `source-blocker-tracked-identity-change` (incl. both-name-and-number change),
   `source-blocker-report-cross-check`, and
-  `sync-clone-source-blocker-cross-report-gate`.
-- Verification result: `self-test` passed `34/34`.
+  `sync-clone-source-blocker-cross-report-gate`, plus interrupted bundle and
+  durable-origin regression cases.
+- Documentation now states explicitly that `apply-clone` does not compile;
+  interface regressions are detected only by a subsequent external
+  `compile-all --apply` in the full workflow.
+- Verification result: `self-test` passed `36/36`.
 
 ## 0.12.3 - 2026-08-27
 

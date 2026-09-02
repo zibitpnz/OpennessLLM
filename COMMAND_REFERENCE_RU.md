@@ -639,7 +639,10 @@ inventory.json
 CLONE_PROJECT\_root\...
 CLONE_PROJECT\plc-blocks.csv
 CLONE_PROJECT\clone-check-blocks.csv
+CLONE_PROJECT\clone-check-groups.csv
+CLONE_PROJECT\clone-check-source-blockers.csv
 CLONE_PROJECT\clone-check-summary.txt
+CLONE_PROJECT\clone-check-bundle.json
 CLONE_PROJECT\_metadata\clone-manifest.json
 CLONE_PROJECT\_metadata\blocks.jsonl
 CLONE_PROJECT\_metadata\groups.jsonl

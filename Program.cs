@@ -28,6 +28,12 @@ namespace OpennessLLM
         private const string ProductVersion = "0.12.3";
         private const string ProductVersionDate = "2026-08-27";
         private const string ProductCreator = "Zibitpnz";
+        private const string CloneCheckBundleSchemaVersion = "1";
+        private const string CloneCheckBundleFileName = "clone-check-bundle.json";
+        private const string CloneCheckBlockFileName = "clone-check-blocks.csv";
+        private const string CloneCheckGroupFileName = "clone-check-groups.csv";
+        private const string CloneCheckSourceBlockerFileName = "clone-check-source-blockers.csv";
+        private const string CloneCheckSummaryFileName = "clone-check-summary.txt";
         private static readonly string[] ToolDirectoryNames = { ProductName };
         private static string _apiDir;
         private static int _printedItems;
@@ -6407,9 +6413,10 @@ namespace OpennessLLM
         private static List<string> BuildWorkspacePlcBlockers(string outDir)
         {
             List<string> blockers = new List<string>();
-            List<Dictionary<string, string>> blockRows = ReadCsvIfExists(Path.Combine(outDir, "clone-check-blocks.csv"));
-            List<Dictionary<string, string>> groupRows = ReadCsvIfExists(Path.Combine(outDir, "clone-check-groups.csv"));
-            List<Dictionary<string, string>> sourceBlockers = ReadCsvIfExists(Path.Combine(outDir, "clone-check-source-blockers.csv"));
+            CloneCheckBundleEvidence bundle = LoadAndValidateCloneCheckBundle(outDir);
+            List<Dictionary<string, string>> blockRows = bundle.BlockRows;
+            List<Dictionary<string, string>> groupRows = bundle.GroupRows;
+            List<Dictionary<string, string>> sourceBlockers = bundle.SourceBlockerRows;
 
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "changed"), "PLC changed blocks");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "added"), "PLC blocks added");
@@ -6690,9 +6697,10 @@ namespace OpennessLLM
             string blockReportPath = Path.Combine(outDir, "clone-check-blocks.csv");
             string groupReportPath = Path.Combine(outDir, "clone-check-groups.csv");
             string sourceBlockerReportPath = Path.Combine(outDir, "clone-check-source-blockers.csv");
-            List<Dictionary<string, string>> blockRows = ReadCsvIfExists(blockReportPath);
-            List<Dictionary<string, string>> groupRows = ReadCsvIfExists(groupReportPath);
-            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            CloneCheckBundleEvidence bundle = LoadAndValidateCloneCheckBundle(outDir);
+            List<Dictionary<string, string>> blockRows = bundle.BlockRows;
+            List<Dictionary<string, string>> groupRows = bundle.GroupRows;
+            List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
 
             layer.ReportPath = blockReportPath;
             layer.SummaryPath = Path.Combine(outDir, "clone-check-summary.txt");
@@ -13419,6 +13427,7 @@ namespace OpennessLLM
         private static void InitializeProjectClone(InventorySnapshot snapshot, string outDir, Options options)
         {
             Directory.CreateDirectory(outDir);
+            InvalidateCloneCheckBundle(outDir);
             string rootDir = Path.Combine(outDir, "_root");
 
             CloneBlockFolderStructure(snapshot, outDir);
@@ -13505,7 +13514,14 @@ namespace OpennessLLM
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
             }
 
-            string compareDir = Path.Combine(outDir, "_compare", "current-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            // A completed marker is the commit record for the report bundle.
+            // Invalidate it before starting so an interrupted check can never
+            // authorize writes with evidence from an older run.
+            string bundleMarkerPath = Path.Combine(outDir, CloneCheckBundleFileName);
+            InvalidateCloneCheckBundle(outDir);
+
+            string checkRunId = Guid.NewGuid().ToString("N");
+            string compareDir = Path.Combine(outDir, "_compare", "current-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff") + "-" + checkRunId.Substring(0, 8));
             string compareRootDir = Path.Combine(compareDir, "_root");
             Directory.CreateDirectory(compareRootDir);
 
@@ -13562,21 +13578,23 @@ namespace OpennessLLM
             List<CloneDiffRecord> blockDiffs = BuildCloneBlockDiffs(cloneBlocks, currentBlocks);
             List<CloneGroupDiffRecord> groupDiffs = BuildCloneGroupDiffs(outDir, snapshot);
 
-            string blockReportPath = Path.Combine(outDir, "clone-check-blocks.csv");
-            WriteCsv(blockReportPath,
+            string publishDir = Path.Combine(outDir, "_check-publish", "run-" + checkRunId);
+            Directory.CreateDirectory(publishDir);
+            string stagedBlockReportPath = Path.Combine(publishDir, CloneCheckBlockFileName);
+            WriteCsv(stagedBlockReportPath,
                 new[]
                 {
-                    "Status", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Number", "AutoNumber", "NumberMode", "NumberSpace",
+                    "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Number", "AutoNumber", "NumberMode", "NumberSpace",
                     "ProgrammingLanguage", "BlockType", "TypeName", "SourceTypeName",
                     "InstanceOfName", "InstanceOfNumber", "InstanceOfType", "SecondaryType",
                     "MemoryLayout", "IsConsistent", "IsKnowHowProtected", "TiaObjectId", "TiaObjectIdStatus",
                     "SourceSha256", "NormalizedSourceSha256",
-                    "CloneGroupPath", "CloneGroupPathDisplay", "CloneGroupPathKey", "CloneName", "CloneNumber", "CloneAutoNumber", "CloneNumberMode", "CloneNumberSpace",
+                    "CloneSoftwarePath", "CloneGroupPath", "CloneGroupPathDisplay", "CloneGroupPathKey", "CloneName", "CloneNumber", "CloneAutoNumber", "CloneNumberMode", "CloneNumberSpace",
                     "CloneProgrammingLanguage", "CloneBlockType", "CloneTypeName", "CloneSourceTypeName",
                     "CloneInstanceOfName", "CloneInstanceOfNumber", "CloneInstanceOfType", "CloneSecondaryType",
                     "CloneMemoryLayout", "CloneIsConsistent", "CloneIsKnowHowProtected", "CloneTiaObjectId", "CloneTiaObjectIdStatus",
                     "CloneSourceSha256", "CloneNormalizedSourceSha256", "CloneRelativePath", "ClonePath", "CloneProvenance",
-                    "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumber", "CurrentAutoNumber", "CurrentNumberMode", "CurrentNumberSpace",
+                    "CurrentSoftwarePath", "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumber", "CurrentAutoNumber", "CurrentNumberMode", "CurrentNumberSpace",
                     "CurrentProgrammingLanguage", "CurrentBlockType", "CurrentTypeName", "CurrentSourceTypeName",
                     "CurrentInstanceOfName", "CurrentInstanceOfNumber", "CurrentInstanceOfType", "CurrentSecondaryType",
                     "CurrentMemoryLayout", "CurrentIsConsistent", "CurrentIsKnowHowProtected", "CurrentTiaObjectId", "CurrentTiaObjectIdStatus",
@@ -13585,17 +13603,17 @@ namespace OpennessLLM
                 },
                 blockDiffs.Select(x => new[]
                 {
-                    x.Status, x.GroupPath, x.GroupPathDisplay, x.GroupPath, x.Name, x.Number, x.AutoNumber, x.NumberMode, x.NumberSpace,
+                    CloneCheckBundleSchemaVersion, checkRunId, x.SoftwarePath, x.Status, x.GroupPath, x.GroupPathDisplay, x.GroupPath, x.Name, x.Number, x.AutoNumber, x.NumberMode, x.NumberSpace,
                     x.ProgrammingLanguage, x.BlockType, x.TypeName, x.SourceTypeName,
                     x.InstanceOfName, x.InstanceOfNumber, x.InstanceOfType, x.SecondaryType,
                     x.MemoryLayout, x.IsConsistent, x.IsKnowHowProtected, x.TiaObjectId, x.TiaObjectIdStatus,
                     x.SourceSha256, x.NormalizedSourceSha256,
-                    x.CloneGroupPath, x.CloneGroupPathDisplay, x.CloneGroupPath, x.CloneName, x.CloneNumber, x.CloneAutoNumber, x.CloneNumberMode, x.CloneNumberSpace,
+                    x.CloneSoftwarePath, x.CloneGroupPath, x.CloneGroupPathDisplay, x.CloneGroupPath, x.CloneName, x.CloneNumber, x.CloneAutoNumber, x.CloneNumberMode, x.CloneNumberSpace,
                     x.CloneProgrammingLanguage, x.CloneBlockType, x.CloneTypeName, x.CloneSourceTypeName,
                     x.CloneInstanceOfName, x.CloneInstanceOfNumber, x.CloneInstanceOfType, x.CloneSecondaryType,
                     x.CloneMemoryLayout, x.CloneIsConsistent, x.CloneIsKnowHowProtected, x.CloneTiaObjectId, x.CloneTiaObjectIdStatus,
                     x.CloneSourceSha256, x.CloneNormalizedSourceSha256, x.CloneRelativePath, x.ClonePath, x.CloneProvenance,
-                    x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumber, x.CurrentAutoNumber, x.CurrentNumberMode, x.CurrentNumberSpace,
+                    x.CurrentSoftwarePath, x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumber, x.CurrentAutoNumber, x.CurrentNumberMode, x.CurrentNumberSpace,
                     x.CurrentProgrammingLanguage, x.CurrentBlockType, x.CurrentTypeName, x.CurrentSourceTypeName,
                     x.CurrentInstanceOfName, x.CurrentInstanceOfNumber, x.CurrentInstanceOfType, x.CurrentSecondaryType,
                     x.CurrentMemoryLayout, x.CurrentIsConsistent, x.CurrentIsKnowHowProtected, x.CurrentTiaObjectId, x.CurrentTiaObjectIdStatus,
@@ -13603,16 +13621,49 @@ namespace OpennessLLM
                     x.Message
                 }));
 
-            string groupReportPath = Path.Combine(outDir, "clone-check-groups.csv");
-            WriteCsv(groupReportPath,
-                new[] { "Status", "GroupPath", "GroupPathDisplay", "GroupPathKey", "CloneDirectory", "Message" },
-                groupDiffs.Select(x => new[] { x.Status, x.GroupPath, x.GroupPathDisplay, x.GroupPath, x.CloneDirectory, x.Message }));
+            string stagedGroupReportPath = Path.Combine(publishDir, CloneCheckGroupFileName);
+            WriteCsv(stagedGroupReportPath,
+                new[] { "CheckSchemaVersion", "CheckRunId", "Status", "GroupPath", "GroupPathDisplay", "GroupPathKey", "CloneDirectory", "Message" },
+                groupDiffs.Select(x => new[] { CloneCheckBundleSchemaVersion, checkRunId, x.Status, x.GroupPath, x.GroupPathDisplay, x.GroupPath, x.CloneDirectory, x.Message }));
 
-            string sourceBlockerReportPath = Path.Combine(outDir, "clone-check-source-blockers.csv");
-            WriteCloneCheckSourceBlockerReport(sourceBlockerReportPath, blockDiffs);
+            string stagedSourceBlockerReportPath = Path.Combine(publishDir, CloneCheckSourceBlockerFileName);
+            WriteCloneCheckSourceBlockerReport(stagedSourceBlockerReportPath, blockDiffs, CloneCheckBundleSchemaVersion, checkRunId);
 
-            string summaryPath = Path.Combine(outDir, "clone-check-summary.txt");
-            WriteCloneCheckSummary(summaryPath, snapshot, outDir, compareDir, cloneBlocks, currentBlocks, blockDiffs, groupDiffs);
+            string stagedSummaryPath = Path.Combine(publishDir, CloneCheckSummaryFileName);
+            WriteCloneCheckSummary(stagedSummaryPath, snapshot, outDir, compareDir, cloneBlocks, currentBlocks, blockDiffs, groupDiffs, CloneCheckBundleSchemaVersion, checkRunId);
+
+            string stagedMarkerPath = Path.Combine(publishDir, CloneCheckBundleFileName);
+            WriteCloneCheckBundleMarker(
+                stagedMarkerPath,
+                checkRunId,
+                compareDir,
+                stagedBlockReportPath,
+                blockDiffs.Count,
+                stagedGroupReportPath,
+                groupDiffs.Count,
+                stagedSourceBlockerReportPath,
+                blockDiffs.Count(IsSourceBlockedDiff),
+                stagedSummaryPath);
+
+            string blockReportPath = Path.Combine(outDir, CloneCheckBlockFileName);
+            string groupReportPath = Path.Combine(outDir, CloneCheckGroupFileName);
+            string sourceBlockerReportPath = Path.Combine(outDir, CloneCheckSourceBlockerFileName);
+            string summaryPath = Path.Combine(outDir, CloneCheckSummaryFileName);
+            PublishFileAtomically(stagedBlockReportPath, blockReportPath, publishDir);
+            PublishFileAtomically(stagedGroupReportPath, groupReportPath, publishDir);
+            PublishFileAtomically(stagedSourceBlockerReportPath, sourceBlockerReportPath, publishDir);
+            PublishFileAtomically(stagedSummaryPath, summaryPath, publishDir);
+            // Commit marker is deliberately last. Consumers reject any bundle
+            // whose marker is absent or whose hashes/run IDs do not match.
+            PublishFileAtomically(stagedMarkerPath, bundleMarkerPath, publishDir);
+            try
+            {
+                Directory.Delete(publishDir, true);
+            }
+            catch
+            {
+                // Publication is already committed. Staging cleanup is best effort.
+            }
 
             Console.WriteLine("Clone check completed.");
             Console.WriteLine("Clone root: " + rootDir);
@@ -13648,11 +13699,13 @@ namespace OpennessLLM
         {
             List<CloneDiffRecord> diffs = new List<CloneDiffRecord>();
             Dictionary<string, CloneBlockRecord> cloneByRelative = cloneBlocks
-                .GroupBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(CloneBlockRelativeIdentity, StringComparer.OrdinalIgnoreCase)
+                .Where(x => !string.IsNullOrWhiteSpace(x.Key))
                 .Where(x => x.Count() == 1)
                 .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
             Dictionary<string, CloneBlockRecord> currentByRelative = currentBlocks
-                .GroupBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(CloneBlockRelativeIdentity, StringComparer.OrdinalIgnoreCase)
+                .Where(x => !string.IsNullOrWhiteSpace(x.Key))
                 .Where(x => x.Count() == 1)
                 .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
             Dictionary<string, CloneBlockRecord> cloneByIdentity = UniqueByIdentity(cloneBlocks);
@@ -13667,7 +13720,7 @@ namespace OpennessLLM
                     CloneBlockRecord blockedClone = FindCloneMatchForCurrent(current, cloneByRelative, cloneByIdentity, cloneByNumberIdentity);
                     if (blockedClone != null)
                     {
-                        usedCloneRelativePaths.Add(blockedClone.RelativePath);
+                        usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(blockedClone));
                     }
 
                     diffs.Add(CloneDiff(SourceBlockedStatus(current, blockedClone), current, blockedClone, SourceBlockedMessage(current, blockedClone)));
@@ -13675,9 +13728,9 @@ namespace OpennessLLM
                 }
 
                 CloneBlockRecord clone;
-                if (cloneByRelative.TryGetValue(current.RelativePath, out clone))
+                if (cloneByRelative.TryGetValue(CloneBlockRelativeIdentity(current), out clone))
                 {
-                    usedCloneRelativePaths.Add(clone.RelativePath);
+                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     bool metadataChanged = !EqualsIgnoreCase(current.Name, clone.Name)
                         || !EqualsIgnoreCase(EmptyIfNull(current.GroupPath), EmptyIfNull(clone.GroupPath))
@@ -13706,7 +13759,7 @@ namespace OpennessLLM
                 string identity = CloneBlockIdentity(current);
                 if (!string.IsNullOrEmpty(identity) && cloneByIdentity.TryGetValue(identity, out clone))
                 {
-                    usedCloneRelativePaths.Add(clone.RelativePath);
+                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone relative path was '" + clone.RelativePath + "', current relative path is '" + current.RelativePath + "'.";
@@ -13722,7 +13775,7 @@ namespace OpennessLLM
                 string numberIdentity = CloneBlockNumberIdentity(current);
                 if (!string.IsNullOrEmpty(numberIdentity) && cloneByNumberIdentity.TryGetValue(numberIdentity, out clone))
                 {
-                    usedCloneRelativePaths.Add(clone.RelativePath);
+                    usedCloneRelativePaths.Add(CloneBlockRelativeIdentity(clone));
                     bool identical = FilesEqual(clone.ClonePath, current.CurrentPath);
                     string status = identical ? "moved-or-renamed" : "moved-or-renamed-and-changed";
                     string message = "Clone block '" + clone.Name + "' at '" + clone.RelativePath + "' matches current block '" + current.Name + "' at '" + current.RelativePath + "' by type and number.";
@@ -13740,12 +13793,12 @@ namespace OpennessLLM
 
             foreach (CloneBlockRecord clone in cloneBlocks)
             {
-                if (usedCloneRelativePaths.Contains(clone.RelativePath))
+                if (usedCloneRelativePaths.Contains(CloneBlockRelativeIdentity(clone)))
                 {
                     continue;
                 }
 
-                if (currentByRelative.ContainsKey(clone.RelativePath))
+                if (currentByRelative.ContainsKey(CloneBlockRelativeIdentity(clone)))
                 {
                     continue;
                 }
@@ -13759,7 +13812,8 @@ namespace OpennessLLM
         private static CloneBlockRecord FindCloneMatchForCurrent(CloneBlockRecord current, Dictionary<string, CloneBlockRecord> cloneByRelative, Dictionary<string, CloneBlockRecord> cloneByIdentity, Dictionary<string, CloneBlockRecord> cloneByNumberIdentity)
         {
             CloneBlockRecord clone;
-            if (!string.IsNullOrWhiteSpace(current.RelativePath) && cloneByRelative.TryGetValue(current.RelativePath, out clone))
+            string relativeIdentity = CloneBlockRelativeIdentity(current);
+            if (!string.IsNullOrWhiteSpace(relativeIdentity) && cloneByRelative.TryGetValue(relativeIdentity, out clone))
             {
                 return clone;
             }
@@ -13856,6 +13910,7 @@ namespace OpennessLLM
             CloneBlockRecord source = current ?? clone;
             return new CloneDiffRecord
             {
+                SoftwarePath = source == null ? string.Empty : EmptyIfNull(source.SoftwarePath),
                 Status = status,
                 GroupPath = source == null ? string.Empty : EmptyIfNull(source.GroupPath),
                 GroupPathDisplay = source == null ? string.Empty : GroupPathDisplay(source.GroupPath),
@@ -13881,6 +13936,7 @@ namespace OpennessLLM
                 NormalizedSourceSha256 = source == null ? string.Empty : source.NormalizedSourceSha256,
                 CloneGroupPath = clone == null ? string.Empty : EmptyIfNull(clone.GroupPath),
                 CloneGroupPathDisplay = clone == null ? string.Empty : GroupPathDisplay(clone.GroupPath),
+                CloneSoftwarePath = clone == null ? string.Empty : EmptyIfNull(clone.SoftwarePath),
                 CloneName = clone == null ? string.Empty : clone.Name,
                 CloneNumber = clone == null ? string.Empty : clone.Number,
                 CloneAutoNumber = clone == null ? string.Empty : clone.AutoNumber,
@@ -13906,6 +13962,7 @@ namespace OpennessLLM
                 CloneProvenance = clone == null ? string.Empty : EmptyIfNull(clone.Provenance),
                 CurrentGroupPath = current == null ? string.Empty : EmptyIfNull(current.GroupPath),
                 CurrentGroupPathDisplay = current == null ? string.Empty : GroupPathDisplay(current.GroupPath),
+                CurrentSoftwarePath = current == null ? string.Empty : EmptyIfNull(current.SoftwarePath),
                 CurrentName = current == null ? string.Empty : current.Name,
                 CurrentNumber = current == null ? string.Empty : current.Number,
                 CurrentAutoNumber = current == null ? string.Empty : current.AutoNumber,
@@ -13970,6 +14027,7 @@ namespace OpennessLLM
         private static string CloneBlockIdentity(CloneBlockRecord block)
         {
             if (block == null
+                || string.IsNullOrWhiteSpace(block.SoftwarePath)
                 || string.IsNullOrWhiteSpace(block.Number)
                 || string.IsNullOrWhiteSpace(block.ProgrammingLanguage)
                 || string.IsNullOrWhiteSpace(block.Name))
@@ -13977,25 +14035,40 @@ namespace OpennessLLM
                 return string.Empty;
             }
 
-            return BlockNumberSpace(block.TypeName, block.ProgrammingLanguage) + "|" + block.Number + "|" + block.Name;
+            return block.SoftwarePath + "|" + BlockNumberSpace(block.TypeName, block.ProgrammingLanguage) + "|" + block.Number + "|" + block.Name;
         }
 
         private static string CloneBlockNumberIdentity(CloneBlockRecord block)
         {
             if (block == null
+                || string.IsNullOrWhiteSpace(block.SoftwarePath)
                 || string.IsNullOrWhiteSpace(block.Number)
                 || string.IsNullOrWhiteSpace(block.ProgrammingLanguage))
             {
                 return string.Empty;
             }
 
-            return BlockNumberSpace(block.TypeName, block.ProgrammingLanguage) + "|" + block.Number;
+            return block.SoftwarePath + "|" + BlockNumberSpace(block.TypeName, block.ProgrammingLanguage) + "|" + block.Number;
         }
 
-        private static void WriteCloneCheckSummary(string path, InventorySnapshot snapshot, string outDir, string compareDir, List<CloneBlockRecord> cloneBlocks, List<CloneBlockRecord> currentBlocks, List<CloneDiffRecord> blockDiffs, List<CloneGroupDiffRecord> groupDiffs)
+        private static string CloneBlockRelativeIdentity(CloneBlockRecord block)
+        {
+            if (block == null
+                || string.IsNullOrWhiteSpace(block.SoftwarePath)
+                || string.IsNullOrWhiteSpace(block.RelativePath))
+            {
+                return string.Empty;
+            }
+
+            return block.SoftwarePath + "|" + block.RelativePath;
+        }
+
+        private static void WriteCloneCheckSummary(string path, InventorySnapshot snapshot, string outDir, string compareDir, List<CloneBlockRecord> cloneBlocks, List<CloneBlockRecord> currentBlocks, List<CloneDiffRecord> blockDiffs, List<CloneGroupDiffRecord> groupDiffs, string schemaVersion, string checkRunId)
         {
             using (StreamWriter writer = NewUtf8Writer(path))
             {
+                writer.WriteLine("Check schema version: " + schemaVersion);
+                writer.WriteLine("Check run ID: " + checkRunId);
                 writer.WriteLine("Project clone checked at: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
                 writer.WriteLine("Project: " + snapshot.ProjectName);
                 writer.WriteLine("Project path: " + snapshot.ProjectPath);
@@ -14011,6 +14084,245 @@ namespace OpennessLLM
             }
         }
 
+        private static void WriteCloneCheckBundleMarker(
+            string path,
+            string checkRunId,
+            string compareDirectory,
+            string blockPath,
+            int blockRowCount,
+            string groupPath,
+            int groupRowCount,
+            string sourceBlockerPath,
+            int sourceBlockerRowCount,
+            string summaryPath)
+        {
+            using (StreamWriter writer = NewUtf8Writer(path))
+            {
+                writer.WriteLine("{");
+                writer.WriteLine("  \"state\": \"complete\",");
+                writer.WriteLine("  \"schemaVersion\": " + Json(CloneCheckBundleSchemaVersion) + ",");
+                writer.WriteLine("  \"checkRunId\": " + Json(checkRunId) + ",");
+                writer.WriteLine("  \"compareDirectory\": " + Json(Path.GetFullPath(compareDirectory)) + ",");
+                writer.WriteLine("  \"blockSha256\": " + Json(ComputeFileSha256(blockPath)) + ",");
+                writer.WriteLine("  \"blockRowCount\": " + Json(blockRowCount.ToString(CultureInfo.InvariantCulture)) + ",");
+                writer.WriteLine("  \"groupSha256\": " + Json(ComputeFileSha256(groupPath)) + ",");
+                writer.WriteLine("  \"groupRowCount\": " + Json(groupRowCount.ToString(CultureInfo.InvariantCulture)) + ",");
+                writer.WriteLine("  \"sourceBlockerSha256\": " + Json(ComputeFileSha256(sourceBlockerPath)) + ",");
+                writer.WriteLine("  \"sourceBlockerRowCount\": " + Json(sourceBlockerRowCount.ToString(CultureInfo.InvariantCulture)) + ",");
+                writer.WriteLine("  \"summarySha256\": " + Json(ComputeFileSha256(summaryPath)));
+                writer.WriteLine("}");
+            }
+        }
+
+        private static void PublishFileAtomically(string stagedPath, string finalPath, string backupDirectory)
+        {
+            if (!File.Exists(stagedPath))
+            {
+                throw new FileNotFoundException("Staged clone-check report was not found.", stagedPath);
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(finalPath));
+            if (!File.Exists(finalPath))
+            {
+                File.Move(stagedPath, finalPath);
+                return;
+            }
+
+            string backupPath = Path.Combine(backupDirectory, Path.GetFileName(finalPath) + ".previous");
+            if (File.Exists(backupPath))
+            {
+                File.Delete(backupPath);
+            }
+
+            File.Replace(stagedPath, finalPath, backupPath, true);
+            if (File.Exists(backupPath))
+            {
+                File.Delete(backupPath);
+            }
+        }
+
+        private static void InvalidateCloneCheckBundle(string outDir)
+        {
+            string markerPath = Path.Combine(outDir, CloneCheckBundleFileName);
+            if (File.Exists(markerPath))
+            {
+                File.Delete(markerPath);
+            }
+        }
+
+        private static CloneCheckBundleEvidence LoadAndValidateCloneCheckBundle(string outDir)
+        {
+            string markerPath = Path.Combine(outDir, CloneCheckBundleFileName);
+            if (!File.Exists(markerPath))
+            {
+                throw new InvalidDataException("Completed clone-check bundle marker is missing. Run check-clone again: " + markerPath);
+            }
+
+            Dictionary<string, string> marker = ParseFlatJsonObject(File.ReadAllText(markerPath, Encoding.UTF8), markerPath);
+            string state = RequiredCloneCheckMarkerValue(marker, "state", markerPath);
+            string schemaVersion = RequiredCloneCheckMarkerValue(marker, "schemaVersion", markerPath);
+            string checkRunId = RequiredCloneCheckMarkerValue(marker, "checkRunId", markerPath);
+            if (!EqualsIgnoreCase(state, "complete"))
+            {
+                throw new InvalidDataException("Clone-check bundle marker is not complete: " + markerPath);
+            }
+
+            if (!EqualsIgnoreCase(schemaVersion, CloneCheckBundleSchemaVersion))
+            {
+                throw new InvalidDataException("Unsupported clone-check bundle schema version '" + schemaVersion + "'. Run check-clone with this tool version.");
+            }
+
+            if (!Regex.IsMatch(checkRunId, "^[0-9a-fA-F]{32}$"))
+            {
+                throw new InvalidDataException("Clone-check bundle has an invalid checkRunId.");
+            }
+
+            string blockPath = Path.Combine(outDir, CloneCheckBlockFileName);
+            string groupPath = Path.Combine(outDir, CloneCheckGroupFileName);
+            string sourceBlockerPath = Path.Combine(outDir, CloneCheckSourceBlockerFileName);
+            string summaryPath = Path.Combine(outDir, CloneCheckSummaryFileName);
+            List<Dictionary<string, string>> blockRows = ValidateCloneCheckCsvFile(blockPath, marker, "block", schemaVersion, checkRunId);
+            List<Dictionary<string, string>> groupRows = ValidateCloneCheckCsvFile(groupPath, marker, "group", schemaVersion, checkRunId);
+            List<Dictionary<string, string>> sourceBlockerRows = ValidateCloneCheckCsvFile(sourceBlockerPath, marker, "sourceBlocker", schemaVersion, checkRunId);
+            ValidateCloneCheckFileHash(summaryPath, RequiredCloneCheckMarkerValue(marker, "summarySha256", markerPath));
+
+            string compareDirectory = Path.GetFullPath(RequiredCloneCheckMarkerValue(marker, "compareDirectory", markerPath));
+            string compareBase = Path.Combine(Path.GetFullPath(outDir), "_compare");
+            EnsurePathInside(compareDirectory, compareBase);
+            if (!Directory.Exists(Path.Combine(compareDirectory, "_root")))
+            {
+                throw new InvalidDataException("Clone-check bundle compare snapshot is missing: " + compareDirectory);
+            }
+
+            ValidateCloneCheckRowPaths(outDir, compareDirectory, blockRows);
+
+            return new CloneCheckBundleEvidence
+            {
+                SchemaVersion = schemaVersion,
+                CheckRunId = checkRunId,
+                CompareDirectory = compareDirectory,
+                BlockRows = blockRows,
+                GroupRows = groupRows,
+                SourceBlockerRows = sourceBlockerRows
+            };
+        }
+
+        private static string RequiredCloneCheckMarkerValue(Dictionary<string, string> marker, string key, string markerPath)
+        {
+            string value;
+            if (marker == null || !marker.TryGetValue(key, out value) || string.IsNullOrWhiteSpace(value))
+            {
+                throw new InvalidDataException("Clone-check bundle marker is missing '" + key + "': " + markerPath);
+            }
+
+            return value.Trim();
+        }
+
+        private static List<Dictionary<string, string>> ValidateCloneCheckCsvFile(
+            string path,
+            Dictionary<string, string> marker,
+            string markerPrefix,
+            string schemaVersion,
+            string checkRunId)
+        {
+            string markerPath = Path.Combine(Path.GetDirectoryName(path), CloneCheckBundleFileName);
+            string expectedHash = RequiredCloneCheckMarkerValue(marker, markerPrefix + "Sha256", markerPath);
+            ValidateCloneCheckFileHash(path, expectedHash);
+
+            int expectedRowCount;
+            string rowCountText = RequiredCloneCheckMarkerValue(marker, markerPrefix + "RowCount", markerPath);
+            if (!int.TryParse(rowCountText, NumberStyles.None, CultureInfo.InvariantCulture, out expectedRowCount) || expectedRowCount < 0)
+            {
+                throw new InvalidDataException("Clone-check bundle marker has an invalid " + markerPrefix + "RowCount.");
+            }
+
+            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
+            if (lines.Length == 0)
+            {
+                throw new InvalidDataException("Clone-check CSV has no header: " + path);
+            }
+
+            List<string> headers = ParseCsvLine(lines[0]);
+            if (!headers.Any(x => EqualsIgnoreCase(x, "CheckSchemaVersion"))
+                || !headers.Any(x => EqualsIgnoreCase(x, "CheckRunId")))
+            {
+                throw new InvalidDataException("Clone-check CSV lacks bundle identity columns: " + path);
+            }
+
+            List<Dictionary<string, string>> rows = ReadCsv(path);
+            if (rows.Count != expectedRowCount)
+            {
+                throw new InvalidDataException("Clone-check CSV row count does not match its bundle marker: " + path);
+            }
+
+            if (rows.Any(row => !EqualsIgnoreCase(GetCsvValue(row, "CheckSchemaVersion"), schemaVersion)
+                || !EqualsIgnoreCase(GetCsvValue(row, "CheckRunId"), checkRunId)))
+            {
+                throw new InvalidDataException("Clone-check CSV contains rows from a different schema/run: " + path);
+            }
+
+            return rows;
+        }
+
+        private static void ValidateCloneCheckFileHash(string path, string expectedHash)
+        {
+            if (!File.Exists(path))
+            {
+                throw new InvalidDataException("Clone-check bundle file is missing: " + path);
+            }
+
+            string actualHash = ComputeFileSha256(path);
+            if (string.IsNullOrWhiteSpace(expectedHash) || !EqualsIgnoreCase(actualHash, expectedHash))
+            {
+                throw new InvalidDataException("Clone-check bundle file hash mismatch: " + path);
+            }
+        }
+
+        private static void EnsureCloneCheckCurrentSourcesUnchanged(List<Dictionary<string, string>> blockRows)
+        {
+            foreach (Dictionary<string, string> row in blockRows ?? new List<Dictionary<string, string>>())
+            {
+                string status = GetCsvValue(row, "Status");
+                if (!EqualsIgnoreCase(status, "changed")
+                    && !EqualsIgnoreCase(status, "added")
+                    && !EqualsIgnoreCase(status, "moved-or-renamed")
+                    && !EqualsIgnoreCase(status, "moved-or-renamed-and-changed"))
+                {
+                    continue;
+                }
+
+                string currentPath = GetCsvValue(row, "CurrentPath");
+                string expectedHash = GetCsvValue(row, "CurrentSourceSha256");
+                if (string.IsNullOrWhiteSpace(currentPath)
+                    || string.IsNullOrWhiteSpace(expectedHash)
+                    || !File.Exists(currentPath)
+                    || !EqualsIgnoreCase(ComputeFileSha256(currentPath), expectedHash))
+                {
+                    throw new InvalidDataException("Current source snapshot changed after check-clone. Run check-clone again: " + FirstNonEmpty(currentPath, "missing path"));
+                }
+            }
+        }
+
+        private static void ValidateCloneCheckRowPaths(string outDir, string compareDirectory, List<Dictionary<string, string>> blockRows)
+        {
+            string rootDir = Path.Combine(Path.GetFullPath(outDir), "_root");
+            string compareRoot = Path.Combine(compareDirectory, "_root");
+            foreach (Dictionary<string, string> row in blockRows ?? new List<Dictionary<string, string>>())
+            {
+                string clonePath = GetCsvValue(row, "ClonePath");
+                if (!string.IsNullOrWhiteSpace(clonePath))
+                {
+                    EnsurePathInside(clonePath, rootDir);
+                }
+
+                string currentPath = GetCsvValue(row, "CurrentPath");
+                if (!string.IsNullOrWhiteSpace(currentPath))
+                {
+                    EnsurePathInside(currentPath, compareRoot);
+                }
+            }
+        }
+
         private static List<RemovedCloneRef> RemovedCloneRefsFromDiffs(List<CloneDiffRecord> blockDiffs)
         {
             return blockDiffs
@@ -14018,20 +14330,26 @@ namespace OpennessLLM
                 .Select(d => new RemovedCloneRef
                 {
                     Key = new BlockKey(
+                        FirstNonEmpty(d.CloneSoftwarePath, d.SoftwarePath),
                         FirstNonEmpty(d.CloneNumberSpace, d.NumberSpace),
                         FirstNonEmpty(d.CloneNumber, d.Number),
                         FirstNonEmpty(d.CloneName, d.Name)),
-                    FromManifest = !EqualsIgnoreCase(d.CloneProvenance, "file-scan"),
+                    ExplicitNewLocalSource = EqualsIgnoreCase(d.CloneProvenance, "explicit-new-local-source"),
                 })
                 .ToList();
         }
 
         private static void WriteCloneCheckSourceBlockerReport(string path, List<CloneDiffRecord> blockDiffs)
         {
+            WriteCloneCheckSourceBlockerReport(path, blockDiffs, CloneCheckBundleSchemaVersion, Guid.NewGuid().ToString("N"));
+        }
+
+        private static void WriteCloneCheckSourceBlockerReport(string path, List<CloneDiffRecord> blockDiffs, string schemaVersion, string checkRunId)
+        {
             List<RemovedCloneRef> removedCloneKeys = RemovedCloneRefsFromDiffs(blockDiffs);
 
             WriteCsv(path,
-                new[] { "Severity", "Code", "Status", "GroupPath", "Name", "NumberSpace", "Number", "CloneLanguage", "CurrentLanguage", "ClonePath", "CurrentPath", "Action", "Message" },
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Code", "Status", "GroupPath", "Name", "NumberSpace", "Number", "CloneLanguage", "CurrentLanguage", "ClonePath", "CurrentPath", "Action", "Message" },
                 blockDiffs
                     .Where(IsSourceBlockedDiff)
                     .OrderBy(x => x.GroupPath)
@@ -14039,9 +14357,13 @@ namespace OpennessLLM
                     .ThenBy(x => x.Name)
                     .Select(x => new[]
                     {
+                        schemaVersion,
+                        checkRunId,
+                        FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
                         SourceBlockedStatusBlocksWrite(
                             x.Status,
                             new BlockKey(
+                                FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
                                 FirstNonEmpty(x.CurrentNumberSpace, x.NumberSpace),
                                 FirstNonEmpty(x.CurrentNumber, x.Number),
                                 FirstNonEmpty(x.CurrentName, x.Name)),
@@ -14078,6 +14400,7 @@ namespace OpennessLLM
                 && SourceBlockedStatusBlocksWrite(
                     d.Status,
                     new BlockKey(
+                        FirstNonEmpty(d.CurrentSoftwarePath, d.SoftwarePath),
                         FirstNonEmpty(d.CurrentNumberSpace, d.NumberSpace),
                         FirstNonEmpty(d.CurrentNumber, d.Number),
                         FirstNonEmpty(d.CurrentName, d.Name)),
@@ -14110,21 +14433,23 @@ namespace OpennessLLM
         // "source-blocked-current-only" row is treated as informational only when
         // BOTH hold:
         //   1. no "removed" clone row could be the same block by number or name, AND
-        //   2. no "removed" clone row that the clone actually tracked
-        //      (Provenance = manifest) shares its block number space.
+        //   2. no "removed" clone row without the exact durable
+        //      explicit-new-local-source origin shares its block number space.
         // (2) fails closed on the ambiguous case where a tracked block changed
-        // both name and number before conversion. A "removed" row for a loose
-        // hand-placed _root file (Provenance = file-scan) is a new clone-only
-        // block and does not, by itself, make an unrelated visual block blocking.
+        // both name and number before conversion, or where manifest provenance
+        // was lost. Only an exact sidecar sourceOrigin opt-in proves a source is
+        // genuinely new local input.
 
         private struct BlockKey
         {
+            public string SoftwarePath;
             public string NumberSpace;
             public string Number;
             public string Name;
 
-            public BlockKey(string numberSpace, string number, string name)
+            public BlockKey(string softwarePath, string numberSpace, string number, string name)
             {
+                SoftwarePath = EmptyIfNull(softwarePath).Trim();
                 NumberSpace = EmptyIfNull(numberSpace).Trim();
                 Number = EmptyIfNull(number).Trim();
                 Name = EmptyIfNull(name).Trim();
@@ -14132,6 +14457,11 @@ namespace OpennessLLM
 
             public bool CouldBeSameBlockAs(BlockKey other)
             {
+                if (!SoftwarePathsCouldOverlap(SoftwarePath, other.SoftwarePath))
+                {
+                    return false;
+                }
+
                 bool numberMatch = NumberSpace.Length > 0 && Number.Length > 0
                     && EqualsIgnoreCase(NumberSpace, other.NumberSpace)
                     && EqualsIgnoreCase(Number, other.Number);
@@ -14143,7 +14473,14 @@ namespace OpennessLLM
         private struct RemovedCloneRef
         {
             public BlockKey Key;
-            public bool FromManifest;
+            public bool ExplicitNewLocalSource;
+        }
+
+        private static bool SoftwarePathsCouldOverlap(string first, string second)
+        {
+            return string.IsNullOrWhiteSpace(first)
+                || string.IsNullOrWhiteSpace(second)
+                || EqualsIgnoreCase(first, second);
         }
 
         private static bool IsInformationalSourceBlockedCandidate(string status)
@@ -14170,11 +14507,12 @@ namespace OpennessLLM
                 refs.Add(new RemovedCloneRef
                 {
                     Key = new BlockKey(
+                        FirstNonEmpty(GetCsvValue(row, "CloneSoftwarePath"), GetCsvValue(row, "SoftwarePath")),
                         FirstNonEmpty(GetCsvValue(row, "CloneNumberSpace"), GetCsvValue(row, "NumberSpace")),
                         FirstNonEmpty(GetCsvValue(row, "CloneNumber"), GetCsvValue(row, "Number")),
                         FirstNonEmpty(GetCsvValue(row, "CloneName"), GetCsvValue(row, "Name"))),
-                    // Unknown/blank provenance (older report) fails closed as "tracked".
-                    FromManifest = !EqualsIgnoreCase(provenance, "file-scan"),
+                    // Unknown/blank/legacy provenance fails closed.
+                    ExplicitNewLocalSource = EqualsIgnoreCase(provenance, "explicit-new-local-source"),
                 });
             }
 
@@ -14202,7 +14540,8 @@ namespace OpennessLLM
                         return true;
                     }
 
-                    if (r.FromManifest
+                    if (!r.ExplicitNewLocalSource
+                        && SoftwarePathsCouldOverlap(liveKey.SoftwarePath, r.Key.SoftwarePath)
                         && liveKey.NumberSpace.Length > 0
                         && EqualsIgnoreCase(liveKey.NumberSpace, r.Key.NumberSpace))
                     {
@@ -14232,6 +14571,7 @@ namespace OpennessLLM
                 }
 
                 BlockKey liveKey = new BlockKey(
+                    FirstNonEmpty(GetCsvValue(row, "CurrentSoftwarePath"), GetCsvValue(row, "SoftwarePath")),
                     FirstNonEmpty(GetCsvValue(row, "CurrentNumberSpace"), GetCsvValue(row, "NumberSpace")),
                     FirstNonEmpty(GetCsvValue(row, "CurrentNumber"), GetCsvValue(row, "Number")),
                     FirstNonEmpty(GetCsvValue(row, "CurrentName"), GetCsvValue(row, "Name")));
@@ -14244,8 +14584,8 @@ namespace OpennessLLM
             return blocking;
         }
 
-        // The dedicated clone-check-source-blockers.csv report is written next to
-        // clone-check-blocks.csv from the same check-clone run and carries a
+        // The dedicated clone-check-source-blockers.csv report is committed in
+        // the same validated evidence bundle as clone-check-blocks.csv and carries a
         // Severity column ("error" for blocking rows). We recompute from the full
         // block report AND cross-check the dedicated report, then fail closed on
         // any disagreement, so a partial or stale main report cannot hide a real
@@ -14276,7 +14616,19 @@ namespace OpennessLLM
             }
 
             // Only current-only visual blocks may be informational warnings.
-            return !IsInformationalSourceBlockedCandidate(status);
+            if (!IsInformationalSourceBlockedCandidate(status))
+            {
+                return true;
+            }
+
+            string softwarePath = FirstNonEmpty(GetCsvValue(row, "CurrentSoftwarePath"), GetCsvValue(row, "SoftwarePath"));
+            string name = FirstNonEmpty(GetCsvValue(row, "CurrentName"), GetCsvValue(row, "Name"));
+            string numberSpace = FirstNonEmpty(GetCsvValue(row, "CurrentNumberSpace"), GetCsvValue(row, "NumberSpace"));
+            string number = FirstNonEmpty(GetCsvValue(row, "CurrentNumber"), GetCsvValue(row, "Number"));
+            bool hasIdentity = !string.IsNullOrWhiteSpace(softwarePath)
+                && (!string.IsNullOrWhiteSpace(name)
+                    || (!string.IsNullOrWhiteSpace(numberSpace) && !string.IsNullOrWhiteSpace(number)));
+            return !hasIdentity;
         }
 
         private static int DedicatedReportBlockerCount(List<Dictionary<string, string>> sourceBlockerRows)
@@ -14362,7 +14714,7 @@ namespace OpennessLLM
                     .FirstOrDefault();
             }
 
-            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone reports contain " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a clone-tracked block of the same number space went missing while an unmatched visual block is present; or clone-check-source-blockers.csv is malformed/inconsistent. Resolve the TIA/clone conflict or regenerate both reports with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
+            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone bundle contains " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a tracked/unknown-orphaned block of the same software and number space went missing while an unmatched visual block is present; or dedicated source-blocker evidence is malformed. Resolve the TIA/clone conflict or regenerate the complete bundle with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
         }
 
         private static void WriteStatusCounts(StreamWriter writer, string label, IEnumerable<string> statuses)
@@ -14391,14 +14743,8 @@ namespace OpennessLLM
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
             }
 
-            string blockReportPath = Path.Combine(outDir, "clone-check-blocks.csv");
-            string sourceBlockerReportPath = Path.Combine(outDir, "clone-check-source-blockers.csv");
-            if (!File.Exists(blockReportPath))
-            {
-                throw new FileNotFoundException("Clone check block report was not found. Run check-clone first.", blockReportPath);
-            }
-
-            string compareDir = FindLatestCompareDirectory(outDir);
+            CloneCheckBundleEvidence bundle = LoadAndValidateCloneCheckBundle(outDir);
+            string compareDir = bundle.CompareDirectory;
             string compareRootDir = Path.Combine(compareDir, "_root");
             if (!Directory.Exists(compareRootDir))
             {
@@ -14409,9 +14755,11 @@ namespace OpennessLLM
             string backupDir = Path.Combine(outDir, "_sync-backups", "sync-" + syncStamp);
             string reportPath = Path.Combine(outDir, "sync-clone-report.csv");
             List<string[]> report = new List<string[]>();
-            List<Dictionary<string, string>> blockRows = ReadCsv(blockReportPath);
-            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            List<Dictionary<string, string>> blockRows = bundle.BlockRows;
+            List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
             EnsureNoSourceBlockersForWrite("sync-clone", blockRows, sourceBlockerRows);
+            EnsureCloneCheckCurrentSourcesUnchanged(blockRows);
+            InvalidateCloneCheckBundle(outDir);
 
             int updated = 0;
             int added = 0;
@@ -14487,9 +14835,9 @@ namespace OpennessLLM
                 }
             }
 
-            SyncCloneGroups(outDir, rootDir, backupDir, report);
+            SyncCloneGroups(bundle.GroupRows, rootDir, backupDir, report);
             WriteSyncedBlockManifest(outDir, rootDir, compareRootDir, blockRows);
-            WriteSyncedGroupManifest(outDir, rootDir);
+            WriteSyncedGroupManifest(outDir, rootDir, bundle.GroupRows);
             WriteCloneMetadata(outDir);
 
             WriteCsv(reportPath,
@@ -14608,15 +14956,9 @@ namespace OpennessLLM
             }
         }
 
-        private static void SyncCloneGroups(string outDir, string rootDir, string backupDir, List<string[]> report)
+        private static void SyncCloneGroups(List<Dictionary<string, string>> groupRows, string rootDir, string backupDir, List<string[]> report)
         {
-            string groupReportPath = Path.Combine(outDir, "clone-check-groups.csv");
-            if (!File.Exists(groupReportPath))
-            {
-                return;
-            }
-
-            foreach (Dictionary<string, string> row in ReadCsv(groupReportPath))
+            foreach (Dictionary<string, string> row in groupRows ?? new List<Dictionary<string, string>>())
             {
                 string status = GetCsvValue(row, "Status");
                 string groupPath = RowGroupPathKey(row, "GroupPath");
@@ -14676,9 +15018,14 @@ namespace OpennessLLM
                 string typeName = GetCsvValue(row, "TypeName");
                 string instanceOfName = GetCsvValue(row, "InstanceOfName");
                 string identity = BlockNumberSpace(typeName, language) + "|" + number + "|" + name;
-                string softwarePath;
-                softwarePaths.TryGetValue(identity, out softwarePath);
-                softwarePath = FirstNonEmpty(softwarePath, defaultSoftwarePath);
+                string manifestSoftwarePath;
+                softwarePaths.TryGetValue(identity, out manifestSoftwarePath);
+                string softwarePath = FirstNonEmpty(
+                    GetCsvValue(row, "CurrentSoftwarePath"),
+                    GetCsvValue(row, "CloneSoftwarePath"),
+                    GetCsvValue(row, "SoftwarePath"),
+                    manifestSoftwarePath,
+                    defaultSoftwarePath);
 
                 rows.Add(BuildSyncedBlockManifestRow(row, softwarePath, destinationPath));
             }
@@ -14686,18 +15033,12 @@ namespace OpennessLLM
             WriteCsv(manifestPath, BlockManifestHeaders(), rows);
         }
 
-        private static void WriteSyncedGroupManifest(string outDir, string rootDir)
+        private static void WriteSyncedGroupManifest(string outDir, string rootDir, List<Dictionary<string, string>> groupRows)
         {
-            string groupReportPath = Path.Combine(outDir, "clone-check-groups.csv");
-            if (!File.Exists(groupReportPath))
-            {
-                return;
-            }
-
             string oldManifestPath = Path.Combine(outDir, "block-groups.csv");
             string softwarePath = LoadFirstSoftwarePath(oldManifestPath);
             List<string[]> rows = new List<string[]>();
-            foreach (Dictionary<string, string> row in ReadCsv(groupReportPath))
+            foreach (Dictionary<string, string> row in groupRows ?? new List<Dictionary<string, string>>())
             {
                 if (EqualsIgnoreCase(GetCsvValue(row, "Status"), "removed"))
                 {
@@ -16371,18 +16712,23 @@ namespace OpennessLLM
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
             }
 
-            if (!File.Exists(blockReportPath))
+            CloneCheckBundleEvidence bundle;
+            try
             {
-                AddApplyCloneGate(gates, "before-write", "workspace-reports", "failed", true, true, false, "Clone check report was not found. Run check-clone first.", blockReportPath, "existing clone-check-blocks.csv", "missing");
+                bundle = LoadAndValidateCloneCheckBundle(outDir);
+            }
+            catch (Exception ex)
+            {
+                AddApplyCloneGate(gates, "before-write", "workspace-reports", "failed", true, true, false, "Clone-check evidence bundle is missing, incomplete, or inconsistent: " + ex.Message, Path.Combine(outDir, CloneCheckBundleFileName), "complete bundle with matching run IDs, hashes, and row counts", ex.GetType().Name + ": " + ex.Message);
                 WriteApplyClonePreflightReports(outDir, plan, preflight.Issues);
                 WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
-                throw new FileNotFoundException("Clone check report was not found. Run check-clone first.", blockReportPath);
+                throw new InvalidOperationException("apply-clone requires a complete, self-consistent clone-check bundle. Run check-clone again.", ex);
             }
 
-            AddApplyCloneGate(gates, "before-write", "workspace-reports", "passed", true, true, false, "Clone root and clone-check reports are present.", blockReportPath, "_root and clone-check-blocks.csv exist", "present");
+            AddApplyCloneGate(gates, "before-write", "workspace-reports", "passed", true, true, false, "Clone root and atomic clone-check evidence bundle are valid.", Path.Combine(outDir, CloneCheckBundleFileName), "matching schema/run IDs, hashes, and row counts", "run=" + bundle.CheckRunId);
 
-            List<Dictionary<string, string>> allRows = ReadCsv(blockReportPath);
-            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            List<Dictionary<string, string>> allRows = bundle.BlockRows;
+            List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
             int sourceBlockerCount = BlockingSourceBlockerCount(allRows, sourceBlockerRows);
             AddApplyCloneGate(
                 gates,
@@ -16539,6 +16885,7 @@ namespace OpennessLLM
             try
             {
                 CheckProjectClone(afterApply, outDir);
+                CloneCheckBundleEvidence afterBundle = LoadAndValidateCloneCheckBundle(outDir);
                 if (File.Exists(blockReportPath))
                 {
                     File.Copy(blockReportPath, afterBlockReportPath, true);
@@ -16549,14 +16896,15 @@ namespace OpennessLLM
                     File.Copy(sourceBlockerReportPath, afterSourceBlockerReportPath, true);
                 }
 
-                List<Dictionary<string, string>> afterRows = ReadCsvIfExists(afterBlockReportPath);
-                List<Dictionary<string, string>> afterSourceBlockers = ReadCsvIfExists(afterSourceBlockerReportPath);
+                List<Dictionary<string, string>> afterRows = afterBundle.BlockRows;
+                List<Dictionary<string, string>> afterSourceBlockers = afterBundle.SourceBlockerRows;
                 int dirtyRows = ApplyCloneDirtyRowCount(afterRows);
                 int afterSourceBlockerCount = BlockingSourceBlockerCount(afterRows, afterSourceBlockers);
                 List<Dictionary<string, string>> formattingOnlyRows = ApplyCloneFormattingOnlyDirtyRows(afterRows, plan, rootDir);
                 int unexpectedDirtyRows = dirtyRows - formattingOnlyRows.Count;
                 if (afterSourceBlockerCount == 0 && unexpectedDirtyRows == 0 && formattingOnlyRows.Count > 0)
                 {
+                    InvalidateCloneCheckBundle(outDir);
                     int reconciledRows = ReconcileApplyCloneFormattingOnlyRows(formattingOnlyRows, rootDir);
                     AddApplyCloneGate(
                         gates,
@@ -16575,6 +16923,7 @@ namespace OpennessLLM
 
                     afterApply = CollectInventory(project, options.ProjectPath);
                     CheckProjectClone(afterApply, outDir);
+                    afterBundle = LoadAndValidateCloneCheckBundle(outDir);
                     if (File.Exists(blockReportPath))
                     {
                         File.Copy(blockReportPath, afterBlockReportPath, true);
@@ -16585,8 +16934,8 @@ namespace OpennessLLM
                         File.Copy(sourceBlockerReportPath, afterSourceBlockerReportPath, true);
                     }
 
-                    afterRows = ReadCsvIfExists(afterBlockReportPath);
-                    afterSourceBlockers = ReadCsvIfExists(afterSourceBlockerReportPath);
+                    afterRows = afterBundle.BlockRows;
+                    afterSourceBlockers = afterBundle.SourceBlockerRows;
                     dirtyRows = ApplyCloneDirtyRowCount(afterRows);
                     afterSourceBlockerCount = BlockingSourceBlockerCount(afterRows, afterSourceBlockers);
                 }
@@ -16663,13 +17012,9 @@ namespace OpennessLLM
                 throw new DirectoryNotFoundException("Clone root was not found. Run init-clone first: " + rootDir);
             }
 
-            if (!File.Exists(blockReportPath))
-            {
-                throw new FileNotFoundException("Clone check report was not found. Run check-clone first.", blockReportPath);
-            }
-
-            List<Dictionary<string, string>> allRows = ReadCsv(blockReportPath);
-            List<Dictionary<string, string>> sourceBlockerRows = ReadCsvIfExists(sourceBlockerReportPath);
+            CloneCheckBundleEvidence bundle = LoadAndValidateCloneCheckBundle(outDir);
+            List<Dictionary<string, string>> allRows = bundle.BlockRows;
+            List<Dictionary<string, string>> sourceBlockerRows = bundle.SourceBlockerRows;
             EnsureNoSourceBlockersForWrite("apply-clone", allRows, sourceBlockerRows);
 
             List<Dictionary<string, string>> rows = allRows
@@ -16725,6 +17070,14 @@ namespace OpennessLLM
             Console.WriteLine("Apply clone changes to TIA project");
             Console.WriteLine("Clone root: " + rootDir);
             Console.WriteLine("Changed/clone-only/clone-deleted/moved-renamed blocks selected: " + plan.Count);
+
+            if (options.Apply)
+            {
+                // Once mutation begins, the pre-write evidence is no longer a
+                // valid authorization artifact. A successful after-check will
+                // publish a fresh completed bundle.
+                InvalidateCloneCheckBundle(outDir);
+            }
 
             foreach (ApplyPlanItem item in plan)
             {
@@ -17841,6 +18194,7 @@ namespace OpennessLLM
                 if (IsSourceBlockedStatus(status))
                 {
                     BlockKey liveKey = new BlockKey(
+                        FirstNonEmpty(GetCsvValue(x, "CurrentSoftwarePath"), GetCsvValue(x, "SoftwarePath")),
                         FirstNonEmpty(GetCsvValue(x, "CurrentNumberSpace"), GetCsvValue(x, "NumberSpace")),
                         FirstNonEmpty(GetCsvValue(x, "CurrentNumber"), GetCsvValue(x, "Number")),
                         FirstNonEmpty(GetCsvValue(x, "CurrentName"), GetCsvValue(x, "Name")));
@@ -20136,7 +20490,7 @@ namespace OpennessLLM
                         CurrentPath = string.Empty,
                         ExportStatus = GetCsvValue(row, "Status"),
                         ExportMessage = GetCsvValue(row, "Message"),
-                        Provenance = "manifest"
+                        Provenance = "tracked-baseline"
                     });
                 }
             }
@@ -20198,9 +20552,11 @@ namespace OpennessLLM
             string autoNumber = FirstNonEmpty(SidecarValue(sidecar, "autoNumber"), AutoNumberFromNumberMode(numberMode));
             string instanceOfName = FirstNonEmpty(SidecarValue(sidecar, "instanceOfName"), dbSource.IsInstanceDb ? dbSource.InstanceOfName : string.Empty);
             string sidecarName = SidecarValue(sidecar, "name");
+            string sidecarSoftwarePath = SidecarValue(sidecar, "softwarePath");
+            string sourceOrigin = SidecarValue(sidecar, "sourceOrigin");
             return new CloneBlockRecord
             {
-                SoftwarePath = softwarePath,
+                SoftwarePath = FirstNonEmpty(sidecarSoftwarePath, softwarePath),
                 GroupPath = groupPath,
                 GroupPathDisplay = GroupPathDisplay(groupPath),
                 Name = FirstNonEmpty(nameFromSource, sidecarName, nameFromFile),
@@ -20220,7 +20576,9 @@ namespace OpennessLLM
                 CurrentPath = string.Empty,
                 ExportStatus = "ok",
                 ExportMessage = message,
-                Provenance = "file-scan"
+                Provenance = EqualsIgnoreCase(sourceOrigin, "explicit-new-local-source")
+                    ? "explicit-new-local-source"
+                    : "unknown-orphaned"
             };
         }
 
@@ -20706,21 +21064,21 @@ namespace OpennessLLM
         private static List<Dictionary<string, string>> ReadCsv(string path)
         {
             List<Dictionary<string, string>> rows = new List<Dictionary<string, string>>();
-            string[] lines = File.ReadAllLines(path, Encoding.UTF8);
-            if (lines.Length == 0)
+            List<string> records = ParseCsvRecords(File.ReadAllText(path, Encoding.UTF8));
+            if (records.Count == 0)
             {
                 return rows;
             }
 
-            List<string> headers = ParseCsvLine(lines[0]);
-            for (int i = 1; i < lines.Length; i++)
+            List<string> headers = ParseCsvLine(records[0]);
+            for (int i = 1; i < records.Count; i++)
             {
-                if (string.IsNullOrWhiteSpace(lines[i]))
+                if (string.IsNullOrWhiteSpace(records[i]))
                 {
                     continue;
                 }
 
-                List<string> values = ParseCsvLine(lines[i]);
+                List<string> values = ParseCsvLine(records[i]);
                 Dictionary<string, string> row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 for (int j = 0; j < headers.Count; j++)
                 {
@@ -20731,6 +21089,53 @@ namespace OpennessLLM
             }
 
             return rows;
+        }
+
+        private static List<string> ParseCsvRecords(string text)
+        {
+            List<string> records = new List<string>();
+            StringBuilder current = new StringBuilder();
+            bool quoted = false;
+            string value = text ?? string.Empty;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c == '"')
+                {
+                    current.Append(c);
+                    if (quoted && i + 1 < value.Length && value[i + 1] == '"')
+                    {
+                        current.Append(value[++i]);
+                    }
+                    else
+                    {
+                        quoted = !quoted;
+                    }
+
+                    continue;
+                }
+
+                if (!quoted && (c == '\r' || c == '\n'))
+                {
+                    records.Add(current.ToString());
+                    current.Length = 0;
+                    if (c == '\r' && i + 1 < value.Length && value[i + 1] == '\n')
+                    {
+                        i++;
+                    }
+
+                    continue;
+                }
+
+                current.Append(c);
+            }
+
+            if (current.Length > 0)
+            {
+                records.Add(current.ToString());
+            }
+
+            return records;
         }
 
         private static List<string> ParseCsvLine(string line)
@@ -21278,6 +21683,8 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "source-blocker-tracked-identity-change", SelfTestSourceBlockerTrackedIdentityChange);
             RunSelfTestCase(results, outDir, "source-blocker-report-cross-check", SelfTestSourceBlockerReportCrossCheck);
             RunSelfTestCase(results, outDir, "sync-clone-source-blocker-cross-report-gate", SelfTestSyncCloneSourceBlockerCrossReportGate);
+            RunSelfTestCase(results, outDir, "clone-check-bundle-interrupted-publication", SelfTestCloneCheckBundleInterruptedPublication);
+            RunSelfTestCase(results, outDir, "clone-source-origin-provenance", SelfTestCloneSourceOriginProvenance);
             RunSelfTestCase(results, outDir, "apply-clone-canonical-source-formatting", SelfTestApplyCloneCanonicalSourceFormatting);
 
             WriteSelfTestReports(outDir, results);
@@ -21575,9 +21982,10 @@ namespace OpennessLLM
             string csvPath = Path.Combine(caseDir, "quoted.csv");
             string name = "\u041a\u043b\u0430\u043f\u0430\u043d, \u0432\u0445\u043e\u0434";
             string text = "\u041e\u043d \u0441\u043a\u0430\u0437\u0430\u043b \"\u041f\u0443\u0441\u043a\"";
+            string multiline = "line one\r\nline two";
             WriteCsv(csvPath,
-                new[] { "Name", "Text", "Path", "Empty" },
-                new[] { new[] { name, text, "Screens\\Main\\Label", string.Empty } });
+                new[] { "Name", "Text", "Path", "Multiline", "Empty" },
+                new[] { new[] { name, text, "Screens\\Main\\Label", multiline, string.Empty } });
 
             string raw = File.ReadAllText(csvPath, Encoding.UTF8);
             AssertTrue(raw.Contains("\"" + name + "\""), "CSV writer did not quote comma-containing unicode field.");
@@ -21588,6 +21996,7 @@ namespace OpennessLLM
             AssertEqual(name, GetCsvValue(rows[0], "Name"), "CSV Name roundtrip");
             AssertEqual(text, GetCsvValue(rows[0], "Text"), "CSV Text roundtrip");
             AssertEqual("Screens\\Main\\Label", GetCsvValue(rows[0], "Path"), "CSV Path roundtrip");
+            AssertEqual(multiline, GetCsvValue(rows[0], "Multiline"), "CSV multiline roundtrip");
             AssertEqual(string.Empty, GetCsvValue(rows[0], "Empty"), "CSV Empty roundtrip");
         }
 
@@ -21999,17 +22408,22 @@ namespace OpennessLLM
 
         private static Dictionary<string, string> SourceBlockerTestRow(string status, string numberSpace, string number, string name)
         {
-            // A "removed" row defaults to manifest provenance (a block the clone
-            // tracked); use the 5-arg overload for a loose hand-placed file.
+            // A "removed" row defaults to durable tracked-baseline provenance.
             return SourceBlockerTestRow(status, numberSpace, number, name,
-                EqualsIgnoreCase(status, "removed") ? "manifest" : string.Empty);
+                EqualsIgnoreCase(status, "removed") ? "tracked-baseline" : string.Empty);
         }
 
         private static Dictionary<string, string> SourceBlockerTestRow(string status, string numberSpace, string number, string name, string cloneProvenance)
         {
+            return SourceBlockerTestRow(status, numberSpace, number, name, cloneProvenance, "PLC");
+        }
+
+        private static Dictionary<string, string> SourceBlockerTestRow(string status, string numberSpace, string number, string name, string cloneProvenance, string softwarePath)
+        {
             bool removed = EqualsIgnoreCase(status, "removed");
             return new Dictionary<string, string>
             {
+                { "SoftwarePath", softwarePath },
                 { "Status", status },
                 { "NumberSpace", numberSpace },
                 { "Number", number },
@@ -22017,9 +22431,11 @@ namespace OpennessLLM
                 { "CurrentNumberSpace", removed ? string.Empty : numberSpace },
                 { "CurrentNumber", removed ? string.Empty : number },
                 { "CurrentName", removed ? string.Empty : name },
+                { "CurrentSoftwarePath", removed ? string.Empty : softwarePath },
                 { "CloneNumberSpace", removed ? numberSpace : string.Empty },
                 { "CloneNumber", removed ? number : string.Empty },
                 { "CloneName", removed ? name : string.Empty },
+                { "CloneSoftwarePath", removed ? softwarePath : string.Empty },
                 { "CloneProvenance", cloneProvenance },
             };
         }
@@ -22098,12 +22514,12 @@ namespace OpennessLLM
             List<CloneDiffRecord> diffs = new List<CloneDiffRecord>
             {
                 // informational: current-only, no matching removed clone record
-                CloneDiff("source-blocked-current-only", new CloneBlockRecord { Name = "Main_Safety_RTG1", Number = "1", NumberSpace = "FB", ProgrammingLanguage = "F_LAD" }, null, "current-only"),
+                CloneDiff("source-blocked-current-only", new CloneBlockRecord { SoftwarePath = "PLC", Name = "Main_Safety_RTG1", Number = "1", NumberSpace = "FB", ProgrammingLanguage = "F_LAD" }, null, "current-only"),
                 // blocking: clone-tracked block converted to a visual language
-                CloneDiff("source-blocked-language-converted", new CloneBlockRecord { Name = "FB_Was_Scl", Number = "20", NumberSpace = "FB", ProgrammingLanguage = "LAD" }, new CloneBlockRecord { Name = "FB_Was_Scl", Number = "20", NumberSpace = "FB", ProgrammingLanguage = "SCL" }, "converted"),
+                CloneDiff("source-blocked-language-converted", new CloneBlockRecord { SoftwarePath = "PLC", Name = "FB_Was_Scl", Number = "20", NumberSpace = "FB", ProgrammingLanguage = "LAD" }, new CloneBlockRecord { SoftwarePath = "PLC", Name = "FB_Was_Scl", Number = "20", NumberSpace = "FB", ProgrammingLanguage = "SCL", Provenance = "tracked-baseline" }, "converted"),
                 // blocking: current-only that shares a number with a removed clone record
-                CloneDiff("source-blocked-current-only", new CloneBlockRecord { Name = "Time_Meter", Number = "31", NumberSpace = "FC", ProgrammingLanguage = "LAD" }, null, "current-only paired"),
-                CloneDiff("removed", null, new CloneBlockRecord { Name = "Time_Meter", Number = "31", NumberSpace = "FC", ProgrammingLanguage = "SCL" }, "removed clone record"),
+                CloneDiff("source-blocked-current-only", new CloneBlockRecord { SoftwarePath = "PLC", Name = "Time_Meter", Number = "31", NumberSpace = "FC", ProgrammingLanguage = "LAD" }, null, "current-only paired"),
+                CloneDiff("removed", null, new CloneBlockRecord { SoftwarePath = "PLC", Name = "Time_Meter", Number = "31", NumberSpace = "FC", ProgrammingLanguage = "SCL", Provenance = "tracked-baseline" }, "removed clone record"),
             };
 
             WriteCloneCheckSourceBlockerReport(reportPath, diffs);
@@ -22143,12 +22559,12 @@ namespace OpennessLLM
             AssertTrue(SourceBlockerGateThrows("sync-clone", colliding), "sync-clone must refuse a current-only/removed collision");
             AssertTrue(ApplyCloneDirtyRowCount(colliding) >= 1, "a colliding current-only row counts as dirty");
 
-            // A genuinely new clone-only block (loose _root file, file-scan
-            // provenance) plus an unrelated fail-safe block: the new block
+            // A genuinely new clone-only block with the exact durable sidecar
+            // provenance plus an unrelated fail-safe block: the new block
             // proceeds, the fail-safe block stays informational.
             List<Dictionary<string, string>> newAndFailSafe = new List<Dictionary<string, string>>
             {
-                SourceBlockerTestRow("removed", "FC", "31", "Widget_New", "file-scan"),
+                SourceBlockerTestRow("removed", "FC", "31", "Widget_New", "explicit-new-local-source"),
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "4", "KUKA_SAFETY_IO"),
             };
             EnsureNoSourceBlockersForWrite("apply-clone", newAndFailSafe, new List<Dictionary<string, string>>());
@@ -22158,7 +22574,7 @@ namespace OpennessLLM
             // block still fails closed (number collision).
             List<Dictionary<string, string>> newCollidesNumber = new List<Dictionary<string, string>>
             {
-                SourceBlockerTestRow("removed", "FC", "4", "Widget_New", "file-scan"),
+                SourceBlockerTestRow("removed", "FC", "4", "Widget_New", "explicit-new-local-source"),
                 SourceBlockerTestRow("source-blocked-current-only", "FC", "4", "KUKA_SAFETY_IO"),
             };
             AssertTrue(SourceBlockerGateThrows("apply-clone", newCollidesNumber), "a new clone-only block reusing a live visual block's number must block");
@@ -22201,6 +22617,21 @@ namespace OpennessLLM
             };
             EnsureNoSourceBlockersForWrite("apply-clone", differentSpace, new List<Dictionary<string, string>>());
             AssertTrue(BlockingSourceBlockerCount(differentSpace, new List<Dictionary<string, string>>()) == 0, "a missing tracked block of a different number space must not block an unrelated fail-safe block");
+
+            List<Dictionary<string, string>> differentSoftware = new List<Dictionary<string, string>>
+            {
+                SourceBlockerTestRow("removed", "FC", "20", "FooBlock", "tracked-baseline", "PLC_A"),
+                SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "BarBlock", string.Empty, "PLC_B"),
+            };
+            EnsureNoSourceBlockersForWrite("apply-clone", differentSoftware, new List<Dictionary<string, string>>());
+            AssertTrue(BlockingSourceBlockerCount(differentSoftware, new List<Dictionary<string, string>>()) == 0, "rows from distinct SoftwarePath values must not be matched");
+
+            List<Dictionary<string, string>> missingSoftware = new List<Dictionary<string, string>>
+            {
+                SourceBlockerTestRow("removed", "FC", "20", "FooBlock", "tracked-baseline", string.Empty),
+                SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "BarBlock", string.Empty, "PLC_B"),
+            };
+            AssertTrue(SourceBlockerGateThrows("apply-clone", missingSoftware), "missing SoftwarePath must fail closed because software scope is ambiguous");
         }
 
         private static void SelfTestSourceBlockerReportCrossCheck(string caseDir)
@@ -22229,11 +22660,24 @@ namespace OpennessLLM
                 new Dictionary<string, string>
                 {
                     { "Severity", "warning" }, { "Status", "source-blocked-current-only" },
+                    { "SoftwarePath", "PLC" },
                     { "Name", "Main_Safety_RTG1" }, { "NumberSpace", "FB" }, { "Number", "1" },
                 },
             };
             AssertTrue(BlockingSourceBlockerCount(benignBlockRows, warningOnly) == 0,
                 "a warning-only dedicated report must not add a blocker");
+
+            List<Dictionary<string, string>> warningWithoutIdentity = new List<Dictionary<string, string>>
+            {
+                new Dictionary<string, string>
+                {
+                    { "Severity", "warning" }, { "Status", "source-blocked-current-only" },
+                    { "SoftwarePath", "PLC" }, { "Name", string.Empty },
+                    { "NumberSpace", string.Empty }, { "Number", string.Empty },
+                },
+            };
+            AssertTrue(BlockingSourceBlockerCount(benignBlockRows, warningWithoutIdentity) == 1,
+                "a warning row without a usable block identity must fail closed");
 
             // A dedicated report with no Severity column (older format) fails closed.
             List<Dictionary<string, string>> noSeverity = new List<Dictionary<string, string>>
@@ -22279,34 +22723,36 @@ namespace OpennessLLM
             string currentPath = Path.Combine(compareRoot, "10_FB_Logic.scl");
             WriteTextFile(clonePath, "clone-before" + Environment.NewLine);
             WriteTextFile(currentPath, "current-after" + Environment.NewLine);
+            string checkRunId = Guid.NewGuid().ToString("N");
 
             WriteCsv(
-                Path.Combine(cloneDir, "clone-check-blocks.csv"),
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
                 new[]
                 {
-                    "Status", "Name", "NumberSpace", "Number",
+                    "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number",
                     "CloneName", "CloneNumberSpace", "CloneNumber",
                     "CurrentName", "CurrentNumberSpace", "CurrentNumber",
-                    "ClonePath", "CurrentPath", "CloneProvenance"
+                    "CloneSoftwarePath", "CurrentSoftwarePath", "ClonePath", "CurrentPath", "CurrentSourceSha256", "CloneProvenance"
                 },
                 new[]
                 {
                     new[]
                     {
-                        "changed", "FB_Logic", "FB", "10",
+                        CloneCheckBundleSchemaVersion, checkRunId, "PLC", "changed", "FB_Logic", "FB", "10",
                         "FB_Logic", "FB", "10",
                         "FB_Logic", "FB", "10",
-                        clonePath, currentPath, "manifest"
+                        "PLC", "PLC", clonePath, currentPath, ComputeFileSha256(currentPath), "tracked-baseline"
                     }
                 });
 
             WriteCsv(
-                Path.Combine(cloneDir, "clone-check-source-blockers.csv"),
-                new[] { "Severity", "Status", "Name", "NumberSpace", "Number" },
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Status", "Name", "NumberSpace", "Number" },
                 new[]
                 {
-                    new[] { "error", "source-blocked-language-converted", "FB_Was_Scl", "FB", "20" }
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC", "error", "source-blocked-language-converted", "FB_Was_Scl", "FB", "20" }
                 });
+            CompleteSelfTestCloneCheckBundle(cloneDir, Path.GetDirectoryName(compareRoot), checkRunId, 1, 1);
 
             bool blocked = false;
             try
@@ -22322,6 +22768,126 @@ namespace OpennessLLM
             AssertEqual("clone-before" + Environment.NewLine, File.ReadAllText(clonePath, Encoding.UTF8), "sync-clone gate must fire before clone source mutation");
             AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-backups")), "sync-clone gate must fire before backup/mutation starts");
             AssertTrue(!File.Exists(Path.Combine(cloneDir, "sync-clone-report.csv")), "sync-clone gate must fire before a success report is written");
+        }
+
+        private static void CompleteSelfTestCloneCheckBundle(string cloneDir, string compareDirectory, string checkRunId, int blockRows, int sourceBlockerRows)
+        {
+            string groupPath = Path.Combine(cloneDir, CloneCheckGroupFileName);
+            WriteCsv(
+                groupPath,
+                new[] { "CheckSchemaVersion", "CheckRunId", "Status" },
+                new string[0][]);
+            string summaryPath = Path.Combine(cloneDir, CloneCheckSummaryFileName);
+            WriteTextFile(summaryPath, "Check schema version: " + CloneCheckBundleSchemaVersion + Environment.NewLine + "Check run ID: " + checkRunId + Environment.NewLine);
+            WriteCloneCheckBundleMarker(
+                Path.Combine(cloneDir, CloneCheckBundleFileName),
+                checkRunId,
+                compareDirectory,
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                blockRows,
+                groupPath,
+                0,
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                sourceBlockerRows,
+                summaryPath);
+        }
+
+        private static void SelfTestCloneCheckBundleInterruptedPublication(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string compareDir = Path.Combine(cloneDir, "_compare", "current-interrupted");
+            string clonePath = Path.Combine(rootDir, "20_FooBlock.scl");
+            WriteTextFile(clonePath, "FUNCTION \"FooBlock\"\nEND_FUNCTION_BLOCK\n");
+            Directory.CreateDirectory(Path.Combine(compareDir, "_root"));
+            string checkRunId = Guid.NewGuid().ToString("N");
+
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckBlockFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Status", "Name", "NumberSpace", "Number", "CloneSoftwarePath", "CloneName", "CloneNumberSpace", "CloneNumber", "ClonePath", "CloneProvenance" },
+                new[]
+                {
+                    new[] { CloneCheckBundleSchemaVersion, checkRunId, "PLC", "removed", "FooBlock", "FC", "20", "PLC", "FooBlock", "FC", "20", clonePath, "tracked-baseline" }
+                });
+
+            bool missingMarkerRejected = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidDataException)
+            {
+                missingMarkerRejected = true;
+            }
+
+            AssertTrue(missingMarkerRejected, "an interrupted publication with only a new main report (even one containing only removed) must be rejected");
+            AssertTrue(File.Exists(clonePath), "missing bundle marker must be rejected before a removed clone source is mutated");
+            AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-backups")), "missing bundle marker must be rejected before backup creation");
+
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Status", "Name", "NumberSpace", "Number" },
+                new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 1, 0);
+            File.Delete(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName));
+
+            bool missingDedicatedRejected = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidDataException)
+            {
+                missingDedicatedRejected = true;
+            }
+
+            AssertTrue(missingDedicatedRejected, "a committed bundle with a missing dedicated source-blocker report must fail closed");
+            AssertTrue(File.Exists(clonePath), "missing dedicated report must be rejected before clone mutation");
+
+            WriteCsv(
+                Path.Combine(cloneDir, CloneCheckSourceBlockerFileName),
+                new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Status", "Name", "NumberSpace", "Number" },
+                new string[0][]);
+            CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 1, 0);
+            WriteTextFile(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName), "tampered after marker\n");
+
+            bool mismatchedBundleRejected = false;
+            try
+            {
+                SyncProjectClone(cloneDir);
+            }
+            catch (InvalidDataException)
+            {
+                mismatchedBundleRejected = true;
+            }
+
+            AssertTrue(mismatchedBundleRejected, "a report changed after marker publication must be rejected by hash validation");
+            AssertTrue(File.Exists(clonePath), "mismatched report bundle must be rejected before clone mutation");
+        }
+
+        private static void SelfTestCloneSourceOriginProvenance(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string sourcePath = Path.Combine(rootDir, "31_Widget_New.scl");
+            WriteTextFile(sourcePath, "FUNCTION \"Widget_New\" : Void\nEND_FUNCTION\n");
+
+            List<CloneBlockRecord> unknown = LoadCloneBlockManifest(cloneDir, rootDir);
+            AssertTrue(unknown.Count == 1, "loose clone source should be discovered");
+            AssertEqual("unknown-orphaned", unknown[0].Provenance, "a loose source without exact origin sidecar must fail closed as unknown/orphaned");
+
+            List<Dictionary<string, string>> orphanedIdentityChange = new List<Dictionary<string, string>>
+            {
+                SourceBlockerTestRow("removed", "FC", "31", "Widget_Old", unknown[0].Provenance, "PLC"),
+                SourceBlockerTestRow("source-blocked-current-only", "FC", "99", "Widget_Renamed", string.Empty, "PLC"),
+            };
+            AssertTrue(SourceBlockerGateThrows("apply-clone", orphanedIdentityChange), "unknown/orphaned source plus renamed+renumbered visual block in the same software/number space must fail closed");
+
+            WriteTextFile(sourcePath + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\"}\n");
+            List<CloneBlockRecord> explicitNew = LoadCloneBlockManifest(cloneDir, rootDir);
+            AssertTrue(explicitNew.Count == 1, "sidecar must not be scanned as a PLC source");
+            AssertEqual("explicit-new-local-source", explicitNew[0].Provenance, "exact sourceOrigin opt-in must establish durable new-local provenance");
+            AssertEqual("PLC", explicitNew[0].SoftwarePath, "sidecar softwarePath must scope a new local source");
         }
 
         private static void SelfTestApplyCloneGatesFinalDuplicateNumber(string caseDir)
@@ -24963,13 +25529,15 @@ namespace OpennessLLM
             public string CurrentPath;
             public string ExportStatus;
             public string ExportMessage;
-            // "manifest" when loaded from plc-blocks.csv (a block the clone has
-            // tracked), "file-scan" when discovered as a loose _root source file.
+            // "tracked-baseline" when loaded from plc-blocks.csv,
+            // "explicit-new-local-source" only when a loose source carries the
+            // exact sidecar opt-in, otherwise "unknown-orphaned" (fail closed).
             public string Provenance;
         }
 
         private sealed class CloneDiffRecord
         {
+            public string SoftwarePath;
             public string Status;
             public string GroupPath;
             public string GroupPathDisplay;
@@ -24995,6 +25563,7 @@ namespace OpennessLLM
             public string NormalizedSourceSha256;
             public string CloneGroupPath;
             public string CloneGroupPathDisplay;
+            public string CloneSoftwarePath;
             public string CloneName;
             public string CloneNumber;
             public string CloneAutoNumber;
@@ -25019,6 +25588,7 @@ namespace OpennessLLM
             public string ClonePath;
             public string CurrentGroupPath;
             public string CurrentGroupPathDisplay;
+            public string CurrentSoftwarePath;
             public string CurrentName;
             public string CurrentNumber;
             public string CurrentAutoNumber;
@@ -25041,9 +25611,19 @@ namespace OpennessLLM
             public string CurrentNormalizedSourceSha256;
             public string CurrentRelativePath;
             public string CurrentPath;
-            // "manifest" / "file-scan" for the clone side of the diff.
+            // Durable clone-side origin classification.
             public string CloneProvenance;
             public string Message;
+        }
+
+        private sealed class CloneCheckBundleEvidence
+        {
+            public string SchemaVersion;
+            public string CheckRunId;
+            public string CompareDirectory;
+            public List<Dictionary<string, string>> BlockRows;
+            public List<Dictionary<string, string>> GroupRows;
+            public List<Dictionary<string, string>> SourceBlockerRows;
         }
 
         private sealed class DbSourceInfo

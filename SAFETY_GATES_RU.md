@@ -294,14 +294,14 @@ source-blocked-export-error         source export отслеживаемого �
 
 1. нет строки `removed`, которая может быть тем же блоком (совпадает
    number space + number **или** имя), и
-2. нет строки `removed` с провенансом `manifest` (блок, который клон реально
-   отслеживал — колонка `CloneProvenance` в `clone-check-blocks.csv`), у которой
-   тот же number space.
+2. нет строки `removed` без точного устойчивого провенанса
+   `explicit-new-local-source`, у которой тот же `SoftwarePath` и number space.
 
 Пункт 2 — fail closed на случай, когда у отслеживаемого блока сменились
-**и имя, и номер** до конвертации в visual. Строка `removed` от вручную
-положенного файла в `_root` (`CloneProvenance = file-scan`) — это новый
-clone-only блок, сам по себе не делает несвязанный visual-блок блокирующим.
+**и имя, и номер** до конвертации в visual или потерялась строка manifest.
+Loose-файл в `_root` без точного sidecar
+`sourceOrigin=explicit-new-local-source` получает провенанс
+`unknown-orphaned` и не получает исключение для нового clone-only блока.
 
 Ещё блокируют: коллизия номера нового clone-only блока с live visual-блоком;
 «забыл сначала удалить LAD-блок» при замене на SCL.
@@ -310,6 +310,11 @@ clone-only блок, сам по себе не делает несвязанны
 `clone-check-source-blockers.csv` (строки `Severity=error`; старый формат без
 колонки — fail closed), берёт максимум — неполный/устаревший основной отчёт не
 спрячет блокер.
+
+`check-clone` публикует отчёты как единый atomic evidence bundle. Marker
+`clone-check-bundle.json` записывается последним и содержит общий schema/run ID,
+row counts, SHA-256 и точный `_compare` directory. `apply-clone` и `sync-clone`
+fail closed при отсутствующем marker, неполном или смешанном наборе отчётов.
 
 `apply-clone` и `sync-clone` используют одну и ту же cross-report проверку.
 `sync-clone` выполняет её до создания backup, изменения source-файлов,
@@ -323,9 +328,10 @@ manifest или sync report. Пустой, отсутствующий или н�
 `clone-check-source-blockers.csv` они идут с `Severity=warning`, блокирующие —
 с `Severity=error`.
 
-Регрессия интерфейса (LAD-вызыватель ломается из-за смены сигнатуры
-изменённого SCL-блока) ловится на `compile-all`, который workflow гоняет после
-apply.
+`apply-clone` сам не компилирует проект. Регрессия интерфейса (например,
+LAD-вызыватель ломается из-за смены сигнатуры изменённого SCL-блока) будет
+обнаружена только последующим отдельным `compile-all --apply`, если выполнен
+полный workflow.
 
 Для LAD/FBD/GRAPH действует дополнительная осторожность. Нужна явная проверка
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это

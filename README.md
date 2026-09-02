@@ -215,6 +215,13 @@ existing blocks that will be changed/renamed/deleted and compares it with
 `CurrentSourceSha256` from the latest `check-clone`; if TIA changed after the
 check, apply is refused.
 
+`check-clone` publishes `clone-check-blocks.csv`,
+`clone-check-groups.csv`, `clone-check-source-blockers.csv`, and the summary as
+one evidence bundle committed by `clone-check-bundle.json`. `apply-clone` and
+`sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
+or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
+the marker and rechecks current-source hashes before changing `_root`.
+
 For new clone-only blocks, an optional sidecar file can be placed next to the
 source file:
 
@@ -224,10 +231,17 @@ MyNewBlock.scl.meta.json
 ```
 
 Supported flat sidecar fields are `blockKind`, `numberMode`, `number`,
-`autoNumber`, `programmingLanguage`, `name`, and `instanceOfName`. When a
+`autoNumber`, `programmingLanguage`, `name`, `instanceOfName`, `softwarePath`,
+and `sourceOrigin`. When a
 sidecar exists, it wins over the filename numeric prefix. Without a sidecar,
 the old shorthand still works: a numeric prefix on a clone-only filename means
 "request this manual block number".
+
+A source discovered outside `plc-blocks.csv` has fail-closed
+`unknown-orphaned` provenance. To assert that it is intentionally new local
+input, set `"sourceOrigin":"explicit-new-local-source"` in its sidecar; this is
+the only loose-source origin that receives the new-block exemption from the
+ambiguous visual-block gate. Use `softwarePath` to scope it when needed.
 
 When the project is already open in TIA Portal, use `--attach`:
 

@@ -220,6 +220,9 @@ CLONE_PROJECT\_root\...
 
 Шаг 6. Скомпилировать:
 
+`apply-clone` сам не запускает compile. Этот отдельный шаг обязателен, если
+нужно обнаружить регрессии интерфейсов и зависимых LAD/FBD-вызовов.
+
 ```cmd
 .\OpennessLLM\run.cmd compile-block --attach --attach-index 0 --name <block-name> --apply
 ```
@@ -289,9 +292,16 @@ CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
   "numberMode": "Manual",
   "number": 120,
   "programmingLanguage": "SCL",
-  "name": "MyNewBlock"
+  "name": "MyNewBlock",
+  "softwarePath": "PLC",
+  "sourceOrigin": "explicit-new-local-source"
 }
 ```
+
+Для нового loose source задавайте точное
+`sourceOrigin=explicit-new-local-source`. Без него происхождение считается
+`unknown-orphaned` и при неоднозначности source-blocker gate завершится fail
+closed.
 
 Шаг 4. Dry-run и apply:
 
