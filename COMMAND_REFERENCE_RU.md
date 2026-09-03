@@ -556,6 +556,11 @@ CLONE_PROJECT\tool-status-summary.txt
 
 `check-all` является alias для `status`.
 
+Если выбранный проект не содержит PLC, PLC layer имеет `not-present`, команда
+успешно завершает authoritative refresh без `clone-check-bundle.json` и не
+восстанавливает прежнюю PLC-авторизацию. Ошибка PLC clone/evidence остаётся
+ошибкой процесса даже после записи `tool-status-*` diagnostics.
+
 Что делает:
 
 ```text
@@ -672,6 +677,8 @@ unchanged
 changed
 added
 removed
+object-replaced-or-mismatched
+ambiguous-rename-and-renumber
 source-blocker
 unsupported
 ```
@@ -694,6 +701,9 @@ Junction/symlink/reparse point внутри workspace отклоняется fai
 live inventory до экспорта всех source и публикации marker. Старый marker
 аннулируется до начала этого сбора; любая ошибка оставляет bundle непригодным для
 записи. Временный immutable snapshot удаляется и при успехе, и при исключении.
+Equal usable `TiaObjectId` резервирует baseline/current пару до всех fallback.
+Разные usable ID у fallback-кандидата и rename+renumber при недоступном ID
+блокируют apply отдельными статусами выше.
 
 ### apply-clone
 
@@ -757,6 +767,10 @@ metadata всех live blocks/groups, а также SHA-256 каждого эк�
 включая блоки вне плана. Доступные TIA object IDs обязаны совпасть; отсутствие ID
 явно отражается warning-состоянием `unproven`. Временный `ExternalSource` удаляется
 строго: ошибка `Delete()` или остаток в коллекции запрещает `SaveProject`.
+`GenerateSource` без ожидаемого файла является ошибкой. После полного экспорта
+повторно проверяется `Project.IsModified`; dirty/unavailable блокирует backup и
+mutation без unsafe override. Owned `_preflight\authoritative-*` удаляется при
+любом исходе, а cleanup failure карантинируется и завершает команду ошибкой.
 После записи проверяются точные postconditions каждого Create/Update/Rename/Delete,
 полный состав blocks/groups, доступная object-ID continuity и language-aware
 SCL/STL token stream. Комментарии входят в canonical content, поэтому
@@ -818,6 +832,8 @@ _apply-reports\apply-clone-operations.jsonl
 
 Команда полезна для точечного debug, но основной baseline лучше вести через
 `init-clone`/`check-clone`.
+Возврат SDK без фактически созданного ожидаемого файла выводится как `error`, а
+не как успешный export.
 
 ### export-xml
 

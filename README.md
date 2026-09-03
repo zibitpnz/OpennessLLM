@@ -249,6 +249,14 @@ latest `check-clone`; a saved or unsaved unplanned TIA edit therefore blocks the
 apply before mutation. TIA object identifiers are also required to remain
 continuous whenever the SDK provides them; unavailable identifiers are
 explicitly reported as unproven rather than silently treated as proof.
+Baseline-to-current matching reserves equal usable TIA object identifiers before
+path/name/number fallbacks. A fallback candidate with a different usable ID is
+reported as blocking `object-replaced-or-mismatched`; simultaneous rename and
+renumber with unavailable IDs is blocking `ambiguous-rename-and-renumber`.
+The complete pre-state export must actually create every requested source file,
+must leave `Project.IsModified=false` unless the explicit unsafe override is in
+effect, and is removed through an owned strict-cleanup lease. Cleanup failure
+quarantines the export with an audit file and fails the command.
 For a real apply, the filesystem project backup is created under the same
 `ExclusiveAccess` lease after all pre-write gates pass. If the clone workspace
 is inside the project directory, that active `--out` directory is excluded from
@@ -301,7 +309,12 @@ serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
 classification and is never moved as generated content.
 `init-workspace` and the bundle-producing PLC portion of `status` / `check-all`
-use the same authoritative lease and clean-project rules.
+use the same authoritative lease and clean-project rules. A successful command
+that found no selected PLC software, or `init-workspace` returning
+`ExistingWorkspace` before a PLC check, closes the refresh attempt without
+creating PLC authorization and keeps any previous PLC bundle revoked. A PLC
+evidence failure remains a command failure even after status diagnostics have
+been written; provisional evidence is never promoted.
 `apply-clone` validates all of these against the open project before constructing
 a plan or invoking any TIA write method. Any pre-schema-4 bundle must be
 refreshed by running `check-clone` again.

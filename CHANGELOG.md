@@ -4,6 +4,18 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Clone baseline correlation now reserves equal usable `TiaObjectId` pairs
+  before path/logical/number fallback. Different usable IDs produce the blocking
+  `object-replaced-or-mismatched` status, while rename plus renumber without a
+  durable ID produces `ambiguous-rename-and-renumber` and no automatic pair.
+- Authorization refresh now completes explicitly with a PLC bundle, without PLC
+  authorization, or as an aborted revoked attempt. HMI-only status/init and the
+  `ExistingWorkspace` outcome no longer fail merely because no PLC bundle was
+  produced; a PLC evidence exception cannot promote provisional reports.
+- Complete apply pre-state source export now treats missing generated files as
+  errors, repeats the project dirty-state gate after export, and strictly removes
+  its owned `_preflight\authoritative-*` directory on every exit. Failed cleanup
+  is quarantined with an audit and fails the command.
 - Authoritative `check-clone`, `init-workspace`, and bundle-producing
   `status` / `check-all` collection now runs under one
   `TiaPortal.ExclusiveAccess` lease, requires a clean project before and after

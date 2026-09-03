@@ -412,7 +412,9 @@ write workflow. Он получает export/source blocker status.
 4. Считает live source SHA-256.
 5. Читает clone metadata baseline.
 6. Читает текущие files в CLONE_PROJECT\_root.
-7. Сравнивает baseline, live TIA и clone files.
+7. Сравнивает baseline, live TIA и clone files: сначала резервирует равные usable
+   `TiaObjectId`, затем применяет fallback. Разные usable ID и неоднозначный
+   rename+renumber без ID получают отдельные blocking status.
 8. Пишет block/group/source-blocker/workspace-inventory/summary reports во временный staging.
 9. Atomic replace публикует отчёты, затем marker в состоянии `reports-prepared`
    `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
@@ -426,6 +428,9 @@ write workflow. Он получает export/source blocker status.
 Attempt sentinel создаётся до API resolution/attach. Ошибка attach,
 `ExclusiveAccess`, scope, inventory, source export или crash до final commit
 поэтому не может оставить старый либо provisional bundle пригодным для записи.
+Успех без PLC evidence (`status` без PLC или ранний `ExistingWorkspace`) удаляет
+attempt без публикации PLC bundle; прежний bundle остаётся отозванным. Ошибка PLC
+слоя после записи diagnostics снова поднимается наружу и запрещает final commit.
 Immutable snapshot в `%TEMP%` принадлежит lease и удаляется строго; failed cleanup
 завершает команду ошибкой и по возможности карантинируется с audit-файлом.
 
@@ -524,7 +529,9 @@ Pipeline:
 6. Запустить preflight checks.
 7. Записать preflight reports.
 8. Под одним `TiaPortal.ExclusiveAccess` проверить dirty-state, полный live
-   pre-state, complete-report safety и immutable source staging также для dry-run.
+   pre-state, повторный dirty-state после source export, complete-report safety и
+   immutable source staging также для dry-run. Временный owned pre-state export
+   удалить на любом пути выхода либо fail closed перенести в quarantine с audit.
 9. Если dry-run, остановиться до TIA writes.
 10. Если --apply, выполнить before-write gates.
 11. После gates создать backup внутри ExclusiveAccess; при unsafe dirty override
@@ -655,6 +662,11 @@ Delete — удалить, а Create — получить ID, которого �
 Временные `ExternalSource` удаляются строгим `Delete()`. Ошибка generation и
 cleanup сохраняется как aggregate failure; присутствие временного source после
 Delete или изменение полного ExternalSource set запрещает переход к Save.
+Успешный возврат `GenerateSource` без ожидаемого файла считается export error.
+Каталог свежих source evidence имеет ownership marker, удаляется в `finally`, а
+неудачный cleanup переносит его в `_preflight-quarantine` и завершает команду
+ошибкой. После экспорта `Project.IsModified` читается повторно: dirty/unavailable
+блокирует backup и mutation без явного unsafe override.
 Canonical source включает нормализованные комментарии: comment-only edit — это
 изменение документации, а не formatting. Для pure rename ожидаемый source берётся
 из immutable staging свежего pre-write экспорта, а не из mutable `_compare`.
@@ -1051,6 +1063,9 @@ clean-local classification;
 HMI ProjectTexts final gates;
 apply-clone gates;
 canonical source formatting.
+TIA object-ID baseline correlation and ambiguous rename+renumber;
+authorization completion without PLC and failed PLC evidence revocation;
+missing GenerateSource output, pre-state cleanup/quarantine, post-export dirty gate.
 ```
 
 Self-test не заменяет real TIA integration run, но быстро ловит регрессии в

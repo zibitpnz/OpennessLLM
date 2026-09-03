@@ -357,6 +357,19 @@ control file при `init-workspace --force`, поэтому не попадае
 bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 
+При сравнении baseline с live TIA сначала резервируются пары с одинаковым
+доступным `TiaObjectId`, и только затем применяются path/logical/number fallback.
+Разные доступные ID дают блокирующий `object-replaced-or-mismatched`. Одновременные
+rename и renumber при недоступном ID дают блокирующий
+`ambiguous-rename-and-renumber`, поэтому из такого состояния нельзя автоматически
+получить destructive apply.
+
+Успешный `status`/`check-all` без выбранного PLC и ранний результат
+`ExistingWorkspace` у `init-workspace` завершают refresh без PLC bundle: attempt
+удаляется, но прежняя PLC-авторизация остаётся отозванной. Ошибка PLC evidence,
+даже если общий status report уже записан, завершает команду ошибкой и не может
+перевести provisional marker в `authoritative-complete`.
+
 `init-clone` и `check-clone` требуют ровно один выбранный `PlcSoftware`; в
 multi-PLC проекте read-only clone нужно ограничить через `--software-path`.
 `apply-clone` пока fail closed, если в открытом проекте больше одного
@@ -412,6 +425,11 @@ pre-state и Create/Update/Rename/Delete continuity; недоступные IDs 
 помечаются `unproven`. Комментарии являются частью canonical content. Pure rename
 использует immutable pre-write source. Ошибка удаления временного ExternalSource,
 его остаток или изменение полного ExternalSource set запрещают `SaveProject`.
+Каждый `GenerateSource` обязан создать ожидаемый файл. После полного pre-state
+экспорта повторно проверяется `Project.IsModified`; новое dirty/unavailable
+состояние блокирует backup и mutation без явного unsafe override. Owned каталог
+`_preflight\authoritative-*` всегда удаляется, а ошибка cleanup приводит к
+audited `_preflight-quarantine` и ошибке команды.
 
 Для LAD/FBD/GRAPH действует дополнительная осторожность. Нужна явная проверка
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это

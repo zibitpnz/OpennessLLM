@@ -118,6 +118,11 @@ CLONE_PROJECT\_hmi_metadata\...
 Если `init-workspace` blocked, смотреть `workspace-init-summary.txt` и
 `workspace-init-steps.csv`.
 
+Для HMI-only проекта отсутствие `plc-blocks.csv` и
+`clone-check-bundle.json` нормально: успешный init/status закрывает refresh без
+PLC-авторизации. Результат `ExistingWorkspace` без `--force` также не требует
+нового PLC bundle и оставляет прежнюю PLC-авторизацию отозванной.
+
 ## 4. Ежедневная проверка состояния
 
 Цель: понять, можно ли безопасно продолжать работу.
@@ -143,6 +148,11 @@ CLONE_PROJECT\hmi-check-summary.txt
 .\OpennessLLM\run.cmd sync-clone --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd hmi-sync-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
+
+Статусы `object-replaced-or-mismatched` и
+`ambiguous-rename-and-renumber` нельзя принимать через автоматический apply:
+сначала нужно вручную разобраться, какой именно engineering object должен
+соответствовать baseline, затем снова выполнить `check-clone`.
 
 Не делать `sync-clone` автоматически. Это означает "я принимаю текущий проект
 как новый baseline".
