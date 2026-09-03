@@ -218,46 +218,37 @@ CLONE_PROJECT\_root\...
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Шаг 6. Если preflight clean, применить и сохранить:
+Шаг 6. Если preflight clean, применить, скомпилировать и сохранить:
 
 ```cmd
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-Шаг 6. Скомпилировать:
+`apply-clone --apply --save` сам запускает самый широкий доступный compile после
+точной post-write проверки и до `SaveProject`. При compiler errors сохранение и
+публикация baseline запрещены. Отдельные `compile-block`/`compile-all` после
+успешного apply не обязательны; они остаются диагностическими командами.
 
-`apply-clone` сам не запускает compile. Этот отдельный шаг обязателен, если
-нужно обнаружить регрессии интерфейсов и зависимых LAD/FBD-вызовов.
+Перед apply проект должен быть сохранён: `Project.IsModified=false`. Если это
+условие невозможно доказать, команда fail closed. Флаг
+`--i-accept-saving-preexisting-project-changes` разрешён только как осознанное
+опасное исключение: он подтверждает сохранение всех уже имевшихся изменений TIA
+и фиксируется в audit-отчёте.
 
-```cmd
-.\OpennessLLM\run.cmd compile-block --attach --attach-index 0 --name <block-name> --apply
-```
-
-или шире:
-
-```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
-```
-
-Шаг 7. Проверить clone:
+Шаг 7. При необходимости отдельно перепроверить clone:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Шаг 8. Если TIA состояние принято как новое правильное состояние:
+Шаг 8. Если отдельно проверенное TIA состояние нужно принять как новое правильное состояние:
 
 ```cmd
 .\OpennessLLM\run.cmd sync-clone --out .\CLONE_PROJECT
 ```
 
-Шаг 9. При необходимости сохранить TIA проект:
-
-```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply --save
-```
-
-или повторить apply с `--save`, если save нужен именно после apply.
+После успешного `apply-clone --apply --save` проект уже скомпилирован, сохранён,
+а новый clone baseline опубликован из свежего post-save snapshot.
 
 ## 7. Создание нового PLC блока
 
@@ -326,10 +317,9 @@ closed. Непустой `softwarePath` обязателен; числовой �
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-Шаг 5. Compile и check:
+Шаг 5. При необходимости дополнительный check:
 
 ```cmd
-.\OpennessLLM\run.cmd compile-block --attach --attach-index 0 --name MyNewBlock --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
@@ -371,10 +361,9 @@ Apply:
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-Потом:
+При необходимости потом:
 
 ```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
@@ -397,7 +386,6 @@ Apply:
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 

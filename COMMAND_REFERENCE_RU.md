@@ -677,10 +677,13 @@ unsupported
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
 Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
-Текущий bundle schema 3 привязан к normalized project path, версии проекта,
+Текущий bundle schema 4 привязан к normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
 Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata
-файлов. Bundle от другого проекта или старой schema отклоняется до apply plan.
+файлов. Diff и inventory создаются из одного immutable snapshot, затем live
+workspace сверяется непосредственно перед marker publication. Bundle от другого
+проекта или старой schema отклоняется до apply plan. Clone-команды держат
+эксклюзивный `.opennessllm-workspace.lock` внутри workspace.
 Проверка единственного PLC и `ExternalSourceGroup` выполняется до invalidation
 существующего bundle и до создания compare/staging файлов.
 
@@ -721,6 +724,21 @@ Dry-run:
 Реальный `--apply` без `--save` отклоняется до первой TIA-записи. Фильтры
 `--name`/`--group` также отклоняются, если в том же свежем bundle остаются
 другие dirty rows: частичный apply не может пройти глобальную post-check.
+
+Real apply держит `TiaPortal.ExclusiveAccess` от preflight до post-save snapshot.
+По умолчанию он требует `Project.IsModified=false`; иначе выдаётся
+`PROJECT_DIRTY_BEFORE_APPLY`. Опасное исключение
+`--i-accept-saving-preexisting-project-changes` явно разрешает сохранить уже
+существовавшие несохранённые изменения и фиксируется в audit.
+
+До первой записи полный block/group report допускает только `unchanged`, все
+actionable rows из immutable plan и доказанные informational current-only rows.
+После записи проверяются точные postconditions каждого Create/Update/Rename/Delete,
+полный состав blocks/groups и language-aware SCL/STL token stream. Reconciliation
+ограничена ожидаемыми formatting/assigned-number/rename/sidecar/manifest
+переходами. Затем `apply-clone` запускает самый широкий доступный compile,
+требует zero errors, получает свежие clean pre-save и post-save snapshots,
+сохраняет TIA и только потом transactionally публикует durable baseline.
 
 Поддерживает:
 

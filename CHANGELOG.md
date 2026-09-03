@@ -11,9 +11,15 @@ All notable changes to OpennessLLM are recorded in this file.
   the exact compare directory, normalized project path, project version, stable
   project object identifier when available, and selected `SoftwarePath` set.
   `apply-clone` / `sync-clone` reject missing, interrupted, tampered, cross-run,
-  or wrong-project bundles before mutation. Schema 3 also binds every source,
+  or wrong-project bundles before mutation. Schema 4 also binds every source,
   sidecar, PLC manifest, and `_metadata` file by relative path, size, and hash;
-  older bundles require a fresh `check-clone`.
+  older bundles require a fresh `check-clone`. Diff generation and workspace
+  inventory now use the same immutable local snapshot, every clone-source hash
+  is cross-checked, and the live workspace is revalidated immediately before
+  marker publication.
+- Clone operations now hold an exclusive `.opennessllm-workspace.lock` file
+  inside the workspace for the complete command. This removes case/temporary
+  directory lock aliases; the lock file is excluded from evidence and staging.
 - `apply-clone` now resolves its TIA write target from the validated bundle and
   fails closed before plan construction when the open project contains more
   than one `PlcSoftware`. `init-clone` / `check-clone` likewise require one
@@ -33,12 +39,19 @@ All notable changes to OpennessLLM are recorded in this file.
   identity and proves exactly one row before any TIA write; the former consumes
   none. A successfully completed tracked deletion removes only its proven row
   before the post-apply check.
-- Real `apply-clone` now requires `--save`, rejects partial dirty selections,
-  stages exact checked source bytes, performs post-write check/sync/check in an
-  isolated workspace, saves TIA, then transactionally publishes `_root`,
-  manifests, and regenerated metadata. Auto-number, rename, delete, and
-  TIA-formatting transitions therefore cannot mutate the durable baseline before
-  acceptance and save. A fresh authorization bundle is published only last.
+- Real `apply-clone` now requires `--save`, rejects partial dirty selections and
+  every malformed, unknown, export-error, or unplanned report row before the
+  first TIA write, and stages the exact checked source bytes. It holds
+  `TiaPortal.ExclusiveAccess` for the complete transaction and defaults to
+  `Project.IsModified=false`; the explicit
+  `--i-accept-saving-preexisting-project-changes` override is audited as unsafe.
+- Post-write acceptance now proves exact Create/Update/Rename/Delete identities,
+  token-stream source equality, the complete block set, and permitted new group
+  ancestors before reconciliation. Reconciliation is restricted to transitions
+  explained by the immutable plan. The broadest SDK-supported target is compiled
+  before Save and any compiler error blocks persistence. Fresh pre-save and
+  post-save inventories/checks must remain clean and stable before `_root`,
+  manifests, regenerated metadata, and a new bundle are published transactionally.
 - `check-clone` now reconciles a renamed tracked source with its missing old
   manifest path only when PLC, group, language/type, and block number form a
   unique one-to-one match. This keeps rename as one `moved-or-renamed` row
@@ -50,7 +63,9 @@ All notable changes to OpennessLLM are recorded in this file.
   hashes before copying. It stages a complete replacement `_root`, manifests,
   and metadata, publishes only after every operation succeeds, rolls back a
   failed commit from `_sync-backups`, and returns non-zero without changing the
-  current baseline/bundle on any staging error.
+  current baseline/bundle on any staging error. The live workspace inventory is
+  checked again immediately before commit, and accepted added/changed/moved
+  sources receive a normalized `tracked-baseline` sidecar.
 - `plc-blocks.csv` and metadata schema 4 record durable `SourceOrigin` as
   `exported-source` or `inventory-only-unsupported`. A mutable `Status` edit no
   longer erases tracked history; legacy/contradictory missing-source rows become
@@ -91,6 +106,10 @@ All notable changes to OpennessLLM are recorded in this file.
   JSON sidecar. Malformed/nested sidecars, invalid JSON escapes, and unescaped
   control characters remain `unknown-orphaned`; JSON whitespace, literals, and
   numbers use their case-sensitive, ASCII-digit standard grammar.
+- Canonical SCL/STL equality now serializes a language-aware token stream instead
+  of deleting whitespace/comments. Token kinds and boundaries, literals,
+  doubled quotes, pragmas/attributes, operators, and STL operands remain distinct;
+  unterminated strings/comments fail closed.
 - A structurally conflicting `added` + `removed` pair that may identify the
   same block (including an unscoped orphan paired with a scoped live block) now
   invalidates the evidence bundle before apply/sync mutation. Distinct report
@@ -131,10 +150,17 @@ All notable changes to OpennessLLM are recorded in this file.
   durable manifest origin, and transactional sync failure.
 - `build.ps1` now propagates the C# compiler exit code so CI cannot report a
   stale executable as a successful build.
-- Documentation now states explicitly that `apply-clone` does not compile;
-  interface regressions are detected only by a subsequent external
-  `compile-all --apply` in the full workflow.
-- Verification result: `self-test` passed `46/46`.
+- Documentation now reflects compile-before-save inside production
+  `apply-clone`; standalone compile commands remain available for diagnostics.
+- Added regressions for immutable snapshot publication, case-aliased
+  cross-process locking, complete-report export errors, exact postconditions,
+  collateral reconciliation rejection, canonical token adversaries, final sync
+  fingerprinting, stale sidecar normalization, and the dirty-project gate.
+- Verification result: `self-test` passed `62/62`.
+- Live TIA Portal V21 validation passed the complete auto-number CreateBlock,
+  UpdateSource, RenameAndUpdateSource, and DeleteBlock lifecycle. Every mutation
+  satisfied exact postconditions, compiled with zero errors/warnings, saved, and
+  ended with a clean schema-4 post-save bundle and no temporary block remaining.
 
 ## 0.12.3 - 2026-08-27
 

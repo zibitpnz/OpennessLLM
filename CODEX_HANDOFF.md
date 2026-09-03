@@ -60,11 +60,13 @@ REM Edit/add/delete/rename source and sidecar files, then refresh the bundle:
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-`apply-clone --apply --save` keeps the existing safety gates: clean baseline,
-source-blocker gate, stale source gate, backup requirement, after-apply check,
-workspace inventory binding, and explicit `--apply` protection. Clone-only
-sources require a sidecar with `softwarePath` and
-`sourceOrigin=explicit-new-local-source`.
+`apply-clone --apply --save` holds `TiaPortal.ExclusiveAccess` across the complete
+transaction and requires an initially clean project unless the high-friction
+dirty-project override is explicitly recorded. It gates the complete report,
+validates exact per-action postconditions, restricts reconciliation to the
+immutable plan, compiles before Save, rechecks fresh pre/post-save inventories,
+and only then publishes the durable baseline. Clone-only sources require a
+sidecar with `softwarePath` and `sourceOrigin=explicit-new-local-source`.
 
 When a block is added manually in TIA Portal and then accepted with
 `check-clone`/`sync-clone`, version `0.12.2` keeps `SoftwarePath` populated in

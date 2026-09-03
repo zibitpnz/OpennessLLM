@@ -145,6 +145,9 @@ The command builds the complete replacement `_root`, manifests, and metadata
 under `_sync-staging` first. Any file/group operation error returns non-zero and
 leaves the current baseline plus its authorization bundle unchanged. Commit
 uses `_sync-backups` and rolls back installed outputs if publication fails.
+Immediately before commit, `sync-clone` revalidates the live workspace inventory;
+accepted added/changed/moved sources receive a normalized `tracked-baseline`
+sidecar so stale one-shot provenance cannot survive the transaction.
 
 Apply changed clone source files back into TIA Portal through External Sources:
 
@@ -183,7 +186,11 @@ contradictory missing-source rows fail closed as `unknown-orphaned`.
 write if a clone source file changed after the latest `check-clone`; run
 `check-clone` again after every edit, add, delete, rename, sidecar change, or
 manifest change and before applying. A real apply always requires both
-`--apply` and `--save`.
+`--apply` and `--save`. It holds TIA Portal `ExclusiveAccess` for the complete
+write/verify/compile/save interval and requires `Project.IsModified=false`
+before writing. The high-friction
+`--i-accept-saving-preexisting-project-changes` option explicitly overrides an
+initial dirty or unavailable state and is recorded as an unsafe audit decision.
 
 `init-clone` and `sync-clone` also write machine-readable metadata under
 `CLONE_PROJECT\_metadata`: `clone-manifest.json`, `blocks.jsonl`,
@@ -234,7 +241,17 @@ If any preflight issue has severity `error`, `--apply` stops before the first
 TIA write. On real `--apply`, the preflight also exports the live TIA source for
 existing blocks that will be changed/renamed/deleted and compares it with
 `CurrentSourceSha256` from the latest `check-clone`; if TIA changed after the
-check, apply is refused.
+check, apply is refused. The complete block/group reports are gated before any
+mutation: only unchanged rows, all planned actionable rows, and proven
+informational current-only blockers are accepted.
+
+After writing, each action must satisfy its exact block identity and token-stream
+source postcondition, and the complete block/group sets must contain no
+collateral change. Only plan-explained formatting, assigned-number, rename,
+sidecar, and manifest transitions may be reconciled. `apply-clone` then compiles
+the broadest supported project/software target and refuses to save on any
+compiler error. Fresh pre-save and post-save inventories must remain clean and
+stable; the durable clone baseline is published only from the post-save snapshot.
 
 `check-clone` publishes `clone-check-blocks.csv`,
 `clone-check-groups.csv`, `clone-check-source-blockers.csv`,
@@ -243,11 +260,15 @@ one evidence bundle committed by `clone-check-bundle.json`. `apply-clone` and
 `sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
 or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
 the marker and rechecks current-source hashes before changing `_root`. Bundle
-schema 3 also binds the normalized TIA project path, project version, stable
+schema 4 also binds the normalized TIA project path, project version, stable
 project object identifier when available, the selected `SoftwarePath` set, and
 a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
+`check-clone` builds its diff and inventory from one immutable local snapshot,
+cross-checks every clone-source hash, and verifies the live workspace again
+immediately before publishing the marker. All clone commands serialize through
+an exclusive `.opennessllm-workspace.lock` file inside the workspace.
 `apply-clone` validates all of these against the open project before constructing
-a plan or invoking any TIA write method. Any pre-schema-3 bundle must be
+a plan or invoking any TIA write method. Any pre-schema-4 bundle must be
 refreshed by running `check-clone` again.
 
 Every new clone-only block must have a sidecar file next to the source file:
@@ -329,6 +350,10 @@ PLC source edits should go through the guarded clone workflow:
 .\OpennessLLM\run.cmd check-clone --attach --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply --save
 ```
+
+The real `apply-clone` command performs the broadest SDK-supported compile after
+post-write verification and before saving. The standalone compile commands below
+remain useful for diagnostics and for changes made outside the clone workflow.
 
 Compile one PLC block and print recursive TIA compiler diagnostics:
 

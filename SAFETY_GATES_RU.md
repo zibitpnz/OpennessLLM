@@ -208,8 +208,15 @@ compile может изменить state без необходимости не
 post-apply gates могут rejected результат, и тогда save не должен происходить.
 ```
 
-Правило: `apply-clone` сам принимает staged post-check до вызова SaveProject;
-для остальных команд использовать `--save` только когда результат принят.
+Правило: `apply-clone` под `TiaPortal.ExclusiveAccess` проверяет исходный
+`Project.IsModified=false`, точные postconditions, выполняет compile, получает
+свежие pre/post-save snapshots и только затем публикует baseline. Для остальных
+команд использовать `--save` только когда результат принят.
+
+Если проект уже dirty или `IsModified` недоступен, real apply fail closed.
+Высокорисковый флаг `--i-accept-saving-preexisting-project-changes` явно
+разрешает сохранить все существовавшие изменения и записывает это решение в
+audit-отчёт.
 
 ## 6. PLC clone baseline gate
 
@@ -235,7 +242,7 @@ InstanceOfName для Instance DB.
 ```
 
 `check-clone` выполняется после любых изменений source, sidecar или manifest.
-Schema 3 связывает bundle с полным отсортированным workspace inventory; edit,
+Schema 4 связывает bundle с полным отсортированным workspace inventory; edit,
 add, delete и rename после check отклоняются до TIA write. Реальный apply требует
 `--apply --save`, а неполный `--name`/`--group` selection запрещён при наличии
 других dirty rows.
@@ -325,7 +332,11 @@ Loose-файл в `_root` без точного sidecar
 row counts, SHA-256, точный `_compare` directory, нормализованный путь проекта,
 версию проекта, стабильный project object ID при его доступности и выбранный
 набор `SoftwarePath`. `apply-clone` сверяет target identity с открытым проектом
-и полный workspace inventory до построения плана и любой TIA-записи. Старые
+и полный workspace inventory до построения плана и любой TIA-записи. Diff и
+inventory строятся из одного immutable snapshot локальных файлов, clone source
+hash сверяются с ним, а live workspace повторно проверяется непосредственно до
+публикации marker. `.opennessllm-workspace.lock` внутри clone исключает обход
+межпроцессной блокировки регистром пути или обычным alias. Старые
 bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 
@@ -357,7 +368,9 @@ missing-source строки считаются `unknown-orphaned`.
 `sync-clone` выполняет её до изменения source-файлов или manifest. Затем вся
 новая версия `_root`, manifests и metadata строится в `_sync-staging`. Любая
 ошибка возвращает non-zero и не публикует baseline; commit использует
-`_sync-backups` и rollback. Пустой, отсутствующий или неизвестный `Severity`, а
+`_sync-backups` и rollback. Непосредственно перед commit снова сверяется live
+workspace fingerprint. Для accepted added/changed/moved sources sidecar
+нормализуется в `tracked-baseline`. Пустой, отсутствующий или неизвестный `Severity`, а
 также malformed строка dedicated report блокируют операцию. Неблокирующим
 считается только явный `Severity=warning` для
 `source-blocked-current-only`.
@@ -367,10 +380,13 @@ missing-source строки считаются `unknown-orphaned`.
 `clone-check-source-blockers.csv` они идут с `Severity=warning`, блокирующие —
 с `Severity=error`.
 
-`apply-clone` сам не компилирует проект. Регрессия интерфейса (например,
-LAD-вызыватель ломается из-за смены сигнатуры изменённого SCL-блока) будет
-обнаружена только последующим отдельным `compile-all --apply`, если выполнен
-полный workflow.
+`apply-clone --apply --save` после точной проверки ожидаемой block/group identity
+и language-aware SCL/STL token stream разрешает только plan-explained
+reconciliation. Затем он компилирует самый широкий SDK-supported scope до
+`SaveProject`; compiler errors запрещают save и публикацию baseline. Свежие
+pre-save и post-save inventory/check должны оставаться чистыми и стабильными.
+Отдельный `compile-all --apply` нужен только для диагностики либо изменений вне
+clone workflow.
 
 Для LAD/FBD/GRAPH действует дополнительная осторожность. Нужна явная проверка
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это
