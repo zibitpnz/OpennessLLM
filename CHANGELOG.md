@@ -22,8 +22,10 @@ All notable changes to OpennessLLM are recorded in this file.
   requires an exportable live source with equal normalized content; metadata-only
   adoption of a pre-existing block is forbidden. The one-to-one promotion batch
   and sidecar/manifest publication use a recoverable `_manifest-publish`
-  transaction. Later manifest loss yields conservative `unknown-orphaned`
-  provenance instead of resurrecting the exemption.
+  transaction. Recovery validates the complete batch before changing any
+  sidecar, and `init-clone` resolves pending promotion state before invalidating
+  the bundle or replacing the baseline. Later manifest loss yields conservative
+  `unknown-orphaned` provenance instead of resurrecting the exemption.
 - Delete preflight now distinguishes a TIA-only block from a tracked block whose
   clone source is missing. The latter carries its immutable clone-side manifest
   identity and proves exactly one row before any TIA write; the former consumes
@@ -111,9 +113,9 @@ All notable changes to OpennessLLM are recorded in this file.
   explicit-new promotion plus later manifest loss, multi-PLC apply rejection,
   and project-A bundle/project-B apply rejection.
 - Added command-path regressions for live-only versus tracked renamed/moved
-  deletion, promotion receipt/content checks and duplicate-batch recovery,
-  pre-mutation multi-PLC rejection, durable manifest origin, and transactional
-  sync failure.
+  deletion, promotion receipt/content checks, duplicate-batch and whole-batch
+  recovery, recovery-before-init ordering, pre-mutation multi-PLC rejection,
+  durable manifest origin, and transactional sync failure.
 - `build.ps1` now propagates the C# compiler exit code so CI cannot report a
   stale executable as a successful build.
 - Documentation now states explicitly that `apply-clone` does not compile;

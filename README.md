@@ -267,11 +267,16 @@ check run, selected PLC, target identity, source hash, language, and resulting
 live object; promotion additionally requires an exportable live source with the
 same normalized content. A pre-existing same-identity block is not adopted.
 The recoverable `_manifest-publish` transaction rewrites the sidecar origin to
-`tracked-baseline` and publishes the manifest as one transition. If that row is later lost, the consumed
-sidecar becomes `unknown-orphaned` instead of receiving the new-block exemption
-again. Delete preflight distinguishes an untracked TIA-only block from a tracked
-missing-source block and proves the exact manifest row to consume before any
-TIA write; only the latter row is removed after a successful deletion.
+`tracked-baseline` and publishes the manifest as one transition. Recovery
+validates the complete journal, staged manifest, sources, identities, and every
+sidecar before consuming any sidecar. A direct `init-clone` rerun finishes this
+recovery before invalidating the current bundle or writing a new baseline, so a
+stale staged manifest cannot later replace the reinitialized manifest. If that
+row is later lost, the consumed sidecar becomes `unknown-orphaned` instead of
+receiving the new-block exemption again. Delete preflight distinguishes an
+untracked TIA-only block from a tracked missing-source block and proves the exact
+manifest row to consume before any TIA write; only the latter row is removed
+after a successful deletion.
 
 When the project is already open in TIA Portal, use `--attach`:
 

@@ -13447,9 +13447,11 @@ namespace OpennessLLM
 
             // All target selection and capability checks must finish before an
             // existing clone workspace or authorization marker is touched.
-            Directory.CreateDirectory(outDir);
-            InvalidateCloneCheckBundle(outDir);
-            string rootDir = Path.Combine(outDir, "_root");
+            // A direct init-clone rerun must also finish any durable provenance
+            // transaction before it starts replacing the baseline. Otherwise a
+            // later check-clone recovery could publish the stale staged manifest
+            // over the newly initialized one.
+            string rootDir = PrepareProjectCloneInitializationWorkspace(outDir);
 
             CloneBlockFolderStructure(snapshot, outDir);
             WriteCloneSummary(snapshot, outDir, options.Force);
@@ -13495,6 +13497,15 @@ namespace OpennessLLM
             Console.WriteLine("PLC block source export errors: " + errors);
             Console.WriteLine("PLC block manifest written to: " + reportPath);
             Console.WriteLine("Inventory written to: " + Path.Combine(outDir, "_inventory"));
+        }
+
+        private static string PrepareProjectCloneInitializationWorkspace(string outDir)
+        {
+            string rootDir = Path.Combine(outDir, "_root");
+            RecoverPendingProvenancePromotions(outDir, rootDir);
+            Directory.CreateDirectory(outDir);
+            InvalidateCloneCheckBundle(outDir);
+            return rootDir;
         }
 
         private static void WriteCloneSummary(InventorySnapshot snapshot, string outDir, bool force)
@@ -21682,6 +21693,7 @@ namespace OpennessLLM
                     { "state", "ready" },
                     { "manifestPath", Path.GetFullPath(manifestPath) },
                     { "manifestSha256", ComputeFileSha256(stagedManifestPath) },
+                    { "journalSha256", ComputeFileSha256(journalPath) },
                     { "promotionCount", promotions.Count.ToString(CultureInfo.InvariantCulture) }
                 });
 
@@ -21723,9 +21735,11 @@ namespace OpennessLLM
 
             string manifestPath = SidecarValue(state, "manifestPath");
             string expectedManifestHash = SidecarValue(state, "manifestSha256");
+            string expectedJournalHash = SidecarValue(state, "journalSha256");
             int expectedCount;
             if (string.IsNullOrWhiteSpace(manifestPath)
                 || string.IsNullOrWhiteSpace(expectedManifestHash)
+                || string.IsNullOrWhiteSpace(expectedJournalHash)
                 || !int.TryParse(SidecarValue(state, "promotionCount"), NumberStyles.None, CultureInfo.InvariantCulture, out expectedCount)
                 || expectedCount <= 0)
             {
@@ -21733,21 +21747,58 @@ namespace OpennessLLM
             }
 
             EnsurePathInside(manifestPath, outDir);
+            string expectedManifestPath = Path.GetFullPath(Path.Combine(outDir, "plc-blocks.csv"));
+            if (!EqualsIgnoreCase(Path.GetFullPath(manifestPath), expectedManifestPath))
+            {
+                throw new InvalidDataException("Provenance promotion transaction targets an unexpected manifest: " + manifestPath);
+            }
+
+            if (!File.Exists(journalPath) || !EqualsIgnoreCase(ComputeFileSha256(journalPath), expectedJournalHash))
+            {
+                throw new InvalidDataException("Provenance promotion transaction journal is missing or changed: " + journalPath);
+            }
+
             List<Dictionary<string, string>> journal = ReadCsv(journalPath);
             if (journal.Count != expectedCount)
             {
                 throw new InvalidDataException("Provenance promotion transaction row count mismatch: " + publishDir);
             }
 
+            string stagedManifestPath = Path.Combine(publishDir, "plc-blocks.csv");
+            bool hasStagedManifest = File.Exists(stagedManifestPath);
+            if (hasStagedManifest)
+            {
+                if (!EqualsIgnoreCase(ComputeFileSha256(stagedManifestPath), expectedManifestHash))
+                {
+                    throw new InvalidDataException("Staged provenance manifest hash mismatch: " + stagedManifestPath);
+                }
+            }
+            else if (!File.Exists(manifestPath) || !EqualsIgnoreCase(ComputeFileSha256(manifestPath), expectedManifestHash))
+            {
+                throw new InvalidDataException("Provenance promotion transaction has neither its staged nor published manifest: " + publishDir);
+            }
+
+            // Validate the complete durable transaction before consuming even
+            // one sidecar. A late invalid row must not leave an earlier row in
+            // tracked-baseline while the manifest remains unpublished.
+            HashSet<string> receiptIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> checkRunIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> sidecarPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> targetIdentities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> liveObjectIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, Dictionary<string, string>> pendingSidecars =
+                new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
             foreach (Dictionary<string, string> row in journal)
             {
+                string receiptId = GetCsvValue(row, "ReceiptId");
+                string checkRunId = GetCsvValue(row, "CheckRunId");
                 string sourcePath = GetCsvValue(row, "SourcePath");
                 string sidecarPath = GetCsvValue(row, "SidecarPath");
                 string sourceHash = GetCsvValue(row, "SourceNormalizedSha256");
-                if (string.IsNullOrWhiteSpace(GetCsvValue(row, "ReceiptId"))
-                    || string.IsNullOrWhiteSpace(GetCsvValue(row, "CheckRunId"))
+                string liveObjectId = GetCsvValue(row, "LiveTiaObjectId");
+                if (string.IsNullOrWhiteSpace(receiptId)
+                    || string.IsNullOrWhiteSpace(checkRunId)
                     || string.IsNullOrWhiteSpace(GetCsvValue(row, "ProgrammingLanguage")))
                 {
                     throw new InvalidDataException("Provenance promotion recovery receipt is incomplete: " + publishDir);
@@ -21763,10 +21814,15 @@ namespace OpennessLLM
                     + GetCsvValue(row, "Name") + "|" + GetCsvValue(row, "NumberSpace") + "|" + GetCsvValue(row, "Number");
                 EnsurePathInside(sourcePath, rootDir);
                 EnsurePathInside(sidecarPath, rootDir);
-                if (!sourcePaths.Add(Path.GetFullPath(sourcePath)) || !targetIdentities.Add(targetIdentity))
+                if (!receiptIds.Add(receiptId)
+                    || !sourcePaths.Add(Path.GetFullPath(sourcePath))
+                    || !sidecarPaths.Add(Path.GetFullPath(sidecarPath))
+                    || !targetIdentities.Add(targetIdentity)
+                    || (!string.IsNullOrWhiteSpace(liveObjectId) && !liveObjectIds.Add(liveObjectId)))
                 {
                     throw new InvalidDataException("Provenance promotion recovery journal is not one-to-one: " + publishDir);
                 }
+                checkRunIds.Add(checkRunId);
 
                 if (!File.Exists(sourcePath) || !EqualsIgnoreCase(ComputeNormalizedTextSha256(sourcePath), sourceHash))
                 {
@@ -21775,10 +21831,13 @@ namespace OpennessLLM
 
                 Dictionary<string, string> sidecar = ParseStrictFlatJsonObject(File.ReadAllText(sidecarPath, Encoding.UTF8), sidecarPath);
                 string origin = SidecarValue(sidecar, "sourceOrigin");
+                if (!EqualsIgnoreCase(SidecarValue(sidecar, "softwarePath"), GetCsvValue(row, "SoftwarePath")))
+                {
+                    throw new InvalidDataException("Provenance promotion sidecar software identity changed before transaction completion: " + sidecarPath);
+                }
                 if (EqualsIgnoreCase(origin, "explicit-new-local-source"))
                 {
-                    sidecar["sourceOrigin"] = "tracked-baseline";
-                    WriteFlatJsonObjectAtomically(sidecarPath, sidecar);
+                    pendingSidecars.Add(sidecarPath, sidecar);
                 }
                 else if (!EqualsIgnoreCase(origin, "tracked-baseline"))
                 {
@@ -21786,14 +21845,19 @@ namespace OpennessLLM
                 }
             }
 
-            string stagedManifestPath = Path.Combine(publishDir, "plc-blocks.csv");
-            if (File.Exists(stagedManifestPath))
+            if (checkRunIds.Count != 1)
             {
-                if (!EqualsIgnoreCase(ComputeFileSha256(stagedManifestPath), expectedManifestHash))
-                {
-                    throw new InvalidDataException("Staged provenance manifest hash mismatch: " + stagedManifestPath);
-                }
+                throw new InvalidDataException("Provenance promotion recovery journal mixes check runs: " + publishDir);
+            }
 
+            foreach (KeyValuePair<string, Dictionary<string, string>> pendingSidecar in pendingSidecars)
+            {
+                pendingSidecar.Value["sourceOrigin"] = "tracked-baseline";
+                WriteFlatJsonObjectAtomically(pendingSidecar.Key, pendingSidecar.Value);
+            }
+
+            if (hasStagedManifest)
+            {
                 PublishFileAtomically(stagedManifestPath, manifestPath, publishDir);
             }
 
@@ -25051,12 +25115,99 @@ namespace OpennessLLM
                 Path.Combine(transactionDir, "provenance-promotion.json"),
                 new Dictionary<string, string>
                 {
-                    { "state", "ready" }, { "manifestPath", finalManifest }, { "manifestSha256", ComputeFileSha256(stagedManifest) }, { "promotionCount", "1" }
+                    { "state", "ready" }, { "manifestPath", finalManifest }, { "manifestSha256", ComputeFileSha256(stagedManifest) },
+                    { "journalSha256", ComputeFileSha256(Path.Combine(transactionDir, "provenance-promotions.csv")) }, { "promotionCount", "1" }
                 });
             RecoverPendingProvenancePromotions(recoveryDir, recoveryRoot);
             AssertEqual("tracked-baseline", SidecarValue(LoadSidecarMetadata(recoverySource), "sourceOrigin"), "interrupted sidecar transition must be recoverable");
             AssertTrue(File.Exists(finalManifest), "interrupted promotion must recover and publish the prepared manifest");
             AssertTrue(!Directory.Exists(Path.Combine(recoveryDir, "_manifest-publish")), "completed promotion recovery must clean its staging root");
+
+            string guardedInitDir = Path.Combine(caseDir, "GUARDED_INIT", "CLONE_PROJECT");
+            string guardedInitRoot = Path.Combine(guardedInitDir, "_root");
+            string guardedSourceA = Path.Combine(guardedInitRoot, "51_Widget_Guarded_A.scl");
+            string guardedSourceB = Path.Combine(guardedInitRoot, "52_Widget_Guarded_B.scl");
+            WriteTextFile(guardedSourceA, "FUNCTION \"Widget_Guarded_A\" : Void\nEND_FUNCTION\n");
+            WriteTextFile(guardedSourceB, "FUNCTION \"Widget_Guarded_B\" : Void\nEND_FUNCTION\n");
+            WriteTextFile(guardedSourceA + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"51\",\"numberMode\":\"Manual\"}\n");
+            WriteTextFile(guardedSourceB + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"52\",\"numberMode\":\"Manual\"}\n");
+            List<CloneBlockRecord> guardedPending = LoadCloneBlockManifest(guardedInitDir, guardedInitRoot)
+                .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            List<CloneBlockRecord> guardedCurrent = new List<CloneBlockRecord>();
+            foreach (CloneBlockRecord guardedClone in guardedPending)
+            {
+                string guardedCurrentPath = Path.Combine(caseDir, "GUARDED_INIT", "CURRENT", Path.GetFileName(guardedClone.ClonePath));
+                WriteTextFile(guardedCurrentPath, File.ReadAllText(guardedClone.ClonePath, Encoding.UTF8));
+                guardedCurrent.Add(CreateSelfTestCurrentCloneRecord(guardedClone, guardedCurrentPath));
+            }
+
+            string guardedTransactionDir = Path.Combine(guardedInitDir, "_manifest-publish", "run-interrupted-batch");
+            string guardedStagedManifest = Path.Combine(guardedTransactionDir, "plc-blocks.csv");
+            string guardedFinalManifest = Path.Combine(guardedInitDir, "plc-blocks.csv");
+            WriteCsv(
+                guardedStagedManifest,
+                BlockManifestHeaders(),
+                guardedCurrent.Select((x, index) => BuildBlockManifestRowFromCloneRecord(x, guardedPending[index].ClonePath, "guarded recovery")));
+            WriteCsv(
+                Path.Combine(guardedTransactionDir, "provenance-promotions.csv"),
+                new[] { "ReceiptId", "CheckRunId", "SourcePath", "SidecarPath", "SourceNormalizedSha256", "SoftwarePath", "GroupPath", "Name", "NumberSpace", "Number", "ProgrammingLanguage", "LiveTiaObjectId", "LiveTiaObjectIdStatus" },
+                guardedPending.Select((x, index) => new[]
+                {
+                    "receipt-guarded-" + index.ToString(CultureInfo.InvariantCulture),
+                    "check-guarded",
+                    x.ClonePath,
+                    x.ClonePath + ".meta.json",
+                    x.NormalizedSourceSha256,
+                    x.SoftwarePath,
+                    x.GroupPath,
+                    x.Name,
+                    x.NumberSpace,
+                    x.Number,
+                    x.ProgrammingLanguage,
+                    "self-test-live-object-" + index.ToString(CultureInfo.InvariantCulture),
+                    "available"
+                }));
+            WriteFlatJsonObjectAtomically(
+                Path.Combine(guardedTransactionDir, "provenance-promotion.json"),
+                new Dictionary<string, string>
+                {
+                    { "state", "ready" },
+                    { "manifestPath", guardedFinalManifest },
+                    { "manifestSha256", ComputeFileSha256(guardedStagedManifest) },
+                    { "journalSha256", ComputeFileSha256(Path.Combine(guardedTransactionDir, "provenance-promotions.csv")) },
+                    { "promotionCount", "2" }
+                });
+            WriteTextFile(guardedFinalManifest, "existing baseline must survive rejected recovery\n");
+            WriteTextFile(Path.Combine(guardedInitDir, CloneCheckBundleFileName), "existing authorization marker\n");
+
+            WriteTextFile(guardedSourceB + ".meta.json", "{\"sourceOrigin\":\"changed-after-staging\",\"softwarePath\":\"PLC\",\"number\":\"52\",\"numberMode\":\"Manual\"}\n");
+            string guardedBeforeRejectedInit = DirectoryTreeFingerprint(guardedInitDir);
+            bool guardedInitRejected = false;
+            try
+            {
+                PrepareProjectCloneInitializationWorkspace(guardedInitDir);
+            }
+            catch (InvalidDataException)
+            {
+                guardedInitRejected = true;
+            }
+
+            AssertTrue(guardedInitRejected, "init-clone preparation must reject a changed later sidecar before reinitializing the baseline");
+            AssertEqual(guardedBeforeRejectedInit, DirectoryTreeFingerprint(guardedInitDir), "failed whole-batch recovery must not consume an earlier sidecar, invalidate the bundle, or change any workspace file");
+            AssertEqual("explicit-new-local-source", SidecarValue(LoadSidecarMetadata(guardedSourceA), "sourceOrigin"), "a valid earlier row must remain pending when a later recovery row is invalid");
+
+            WriteTextFile(guardedSourceB + ".meta.json", "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"52\",\"numberMode\":\"Manual\"}\n");
+            PrepareProjectCloneInitializationWorkspace(guardedInitDir);
+            AssertTrue(!File.Exists(Path.Combine(guardedInitDir, CloneCheckBundleFileName)), "init-clone preparation must invalidate the old bundle only after pending promotion recovery succeeds");
+            AssertTrue(!Directory.Exists(Path.Combine(guardedInitDir, "_manifest-publish")), "init-clone preparation must finish and remove the stale promotion transaction before baseline writes begin");
+            AssertTrue(guardedPending.All(x => EqualsIgnoreCase(SidecarValue(LoadSidecarMetadata(x.ClonePath), "sourceOrigin"), "tracked-baseline")), "successful whole-batch recovery must consume every validated sidecar");
+            AssertTrue(ReadCsv(guardedFinalManifest).Count == 2, "successful whole-batch recovery must publish the staged manifest");
+
+            WriteTextFile(guardedFinalManifest, "newly initialized baseline\n");
+            string newBaselineHash = ComputeFileSha256(guardedFinalManifest);
+            RecoverPendingProvenancePromotions(guardedInitDir, guardedInitRoot);
+            AssertEqual(newBaselineHash, ComputeFileSha256(guardedFinalManifest), "a later check-clone recovery must not overwrite the newly initialized baseline with a stale manifest");
         }
 
         private static void SelfTestCloneManifestSourceOriginDurable(string caseDir)
