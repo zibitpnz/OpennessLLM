@@ -162,6 +162,11 @@ API, and delete/recreate can break hidden links. Move blocks manually in TIA
 Portal, then run `check-clone` and `sync-clone` to accept the project-side move
 into the clone.
 
+For a clone-side rename, keep the numeric filename prefix, rename the block in
+the source text, and move the adjacent `.meta.json` sidecar with the source when
+one exists. `check-clone` recognizes the rename only through a unique matching
+PLC/group/type/number identity; an ambiguous match remains blocked.
+
 Instance DB metadata is tracked through the `InstanceOfName` column in
 `plc-blocks.csv` and `clone-check-blocks.csv`. New `.db` files are classified as
 `GlobalDB` or `InstanceDB` from their source text. `apply-clone` keeps Instance

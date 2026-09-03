@@ -39,6 +39,12 @@ All notable changes to OpennessLLM are recorded in this file.
   manifests, and regenerated metadata. Auto-number, rename, delete, and
   TIA-formatting transitions therefore cannot mutate the durable baseline before
   acceptance and save. A fresh authorization bundle is published only last.
+- `check-clone` now reconciles a renamed tracked source with its missing old
+  manifest path only when PLC, group, language/type, and block number form a
+  unique one-to-one match. This keeps rename as one `moved-or-renamed` row
+  instead of an unsafe delete/create pair. Explicit-new sources cannot use this
+  adoption path. Successful auto-number promotion also persists the assigned
+  live number in the tracked sidecar.
 - `sync-clone` no longer guesses the newest `_compare` directory; it consumes
   the directory bound to the validated bundle and verifies current-source
   hashes before copying. It stages a complete replacement `_root`, manifests,

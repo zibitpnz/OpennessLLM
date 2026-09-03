@@ -346,8 +346,12 @@ workflow.
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Переименовать source file в `CLONE_PROJECT\_root\...` и, если нужно, обновить
-имя внутри source text.
+Переименовать source file в `CLONE_PROJECT\_root\...`, обновить имя внутри
+source text и перенести соседний `.meta.json` вместе с source, если sidecar
+существует. Числовой префикс файла сохраняют: например,
+`10_OldName.scl` -> `10_NewName.scl`. `check-clone` принимает такой rename
+только при единственном совпадении PLC/group/type/number; неоднозначность
+остаётся fail closed.
 
 После rename заново выпустить bundle:
 

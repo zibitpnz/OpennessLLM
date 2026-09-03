@@ -22024,7 +22024,118 @@ namespace OpennessLLM
                 records.Add(CreateCloneBlockRecordFromSourceFile(rootDir, file, "Loaded from clone file scan."));
             }
 
+            ReconcileMovedTrackedCloneSources(records);
             return records;
+        }
+
+        private static void ReconcileMovedTrackedCloneSources(List<CloneBlockRecord> records)
+        {
+            List<CloneBlockRecord> missingTracked = (records ?? new List<CloneBlockRecord>())
+                .Where(x => x != null
+                    && EqualsIgnoreCase(x.Provenance, "tracked-baseline")
+                    && !CloneSourceFileExists(x))
+                .ToList();
+            List<CloneBlockRecord> looseSources = (records ?? new List<CloneBlockRecord>())
+                .Where(x => x != null
+                    && EqualsIgnoreCase(x.Provenance, "unknown-orphaned")
+                    && CloneSourceFileExists(x))
+                .ToList();
+            List<Tuple<CloneBlockRecord, CloneBlockRecord>> matches = new List<Tuple<CloneBlockRecord, CloneBlockRecord>>();
+
+            foreach (CloneBlockRecord loose in looseSources)
+            {
+                List<CloneBlockRecord> candidates = missingTracked
+                    .Where(tracked => MovedTrackedCloneSourceMatches(tracked, loose))
+                    .ToList();
+                if (candidates.Count != 1)
+                {
+                    continue;
+                }
+
+                CloneBlockRecord trackedMatch = candidates[0];
+                if (looseSources.Count(candidate => MovedTrackedCloneSourceMatches(trackedMatch, candidate)) != 1)
+                {
+                    continue;
+                }
+
+                matches.Add(Tuple.Create(trackedMatch, loose));
+            }
+
+            foreach (Tuple<CloneBlockRecord, CloneBlockRecord> match in matches
+                .Where(x => matches.Count(y => object.ReferenceEquals(y.Item1, x.Item1)) == 1))
+            {
+                CloneBlockRecord tracked = match.Item1;
+                CloneBlockRecord moved = match.Item2;
+                bool hasTrackedSidecar = HasValidTrackedBaselineSidecar(moved, tracked.SoftwarePath);
+
+                moved.SoftwarePath = tracked.SoftwarePath;
+                moved.Number = tracked.Number;
+                if (!hasTrackedSidecar)
+                {
+                    moved.AutoNumber = tracked.AutoNumber;
+                    moved.NumberMode = tracked.NumberMode;
+                    moved.InstanceOfName = FirstNonEmpty(moved.InstanceOfName, tracked.InstanceOfName);
+                }
+                moved.InstanceOfNumber = FirstNonEmpty(moved.InstanceOfNumber, tracked.InstanceOfNumber);
+                moved.InstanceOfType = FirstNonEmpty(moved.InstanceOfType, tracked.InstanceOfType);
+                moved.SecondaryType = FirstNonEmpty(moved.SecondaryType, tracked.SecondaryType);
+                moved.MemoryLayout = FirstNonEmpty(moved.MemoryLayout, tracked.MemoryLayout);
+                moved.IsConsistent = FirstNonEmpty(moved.IsConsistent, tracked.IsConsistent);
+                moved.IsKnowHowProtected = FirstNonEmpty(moved.IsKnowHowProtected, tracked.IsKnowHowProtected);
+                moved.TiaObjectId = FirstNonEmpty(moved.TiaObjectId, tracked.TiaObjectId);
+                moved.TiaObjectIdStatus = FirstNonEmpty(moved.TiaObjectIdStatus, tracked.TiaObjectIdStatus);
+                moved.Provenance = "tracked-baseline";
+                moved.ExportMessage = "Matched moved tracked source to its missing manifest row by unique PLC/group/type/number identity.";
+                records.Remove(tracked);
+            }
+        }
+
+        private static bool MovedTrackedCloneSourceMatches(CloneBlockRecord tracked, CloneBlockRecord loose)
+        {
+            if (tracked == null
+                || loose == null
+                || CloneSourceFileExists(tracked)
+                || !CloneSourceFileExists(loose)
+                || SafeInt(tracked.Number) <= 0
+                || SafeInt(tracked.Number) != SafeInt(loose.Number)
+                || !EqualsIgnoreCase(EmptyIfNull(tracked.GroupPath), EmptyIfNull(loose.GroupPath))
+                || !EqualsIgnoreCase(
+                    FirstNonEmpty(tracked.NumberSpace, BlockNumberSpace(tracked.TypeName, tracked.ProgrammingLanguage)),
+                    FirstNonEmpty(loose.NumberSpace, BlockNumberSpace(loose.TypeName, loose.ProgrammingLanguage)))
+                || (!string.IsNullOrWhiteSpace(tracked.ProgrammingLanguage)
+                    && !string.IsNullOrWhiteSpace(loose.ProgrammingLanguage)
+                    && !EqualsIgnoreCase(tracked.ProgrammingLanguage, loose.ProgrammingLanguage)))
+            {
+                return false;
+            }
+
+            string sidecarPath = loose.ClonePath + ".meta.json";
+            if (!File.Exists(sidecarPath))
+            {
+                return string.IsNullOrWhiteSpace(loose.SoftwarePath);
+            }
+
+            return HasValidTrackedBaselineSidecar(loose, tracked.SoftwarePath);
+        }
+
+        private static bool HasValidTrackedBaselineSidecar(CloneBlockRecord source, string softwarePath)
+        {
+            if (source == null || string.IsNullOrWhiteSpace(source.ClonePath))
+            {
+                return false;
+            }
+
+            string sidecarPath = source.ClonePath + ".meta.json";
+            if (!File.Exists(sidecarPath))
+            {
+                return false;
+            }
+
+            Dictionary<string, string> sidecar = LoadSidecarMetadata(source.ClonePath);
+            return sidecar.Count > 0
+                && EqualsIgnoreCase(SidecarValue(sidecar, "sourceOrigin"), "tracked-baseline")
+                && !string.IsNullOrWhiteSpace(SidecarValue(sidecar, "softwarePath"))
+                && EqualsIgnoreCase(SidecarValue(sidecar, "softwarePath"), softwarePath);
         }
 
         private static int PromoteMatchedExplicitNewSources(
@@ -22257,7 +22368,7 @@ namespace OpennessLLM
                     x.Clone.GroupPath,
                     x.Clone.Name,
                     FirstNonEmpty(x.Clone.NumberSpace, BlockNumberSpace(x.Clone.TypeName, x.Clone.ProgrammingLanguage)),
-                    x.Clone.Number,
+                    x.Current.Number,
                     x.Receipt.ProgrammingLanguage,
                     x.Receipt.LiveTiaObjectId,
                     x.Receipt.LiveTiaObjectIdStatus
@@ -22417,6 +22528,7 @@ namespace OpennessLLM
                 }
                 if (EqualsIgnoreCase(origin, "explicit-new-local-source"))
                 {
+                    sidecar["number"] = GetCsvValue(row, "Number");
                     pendingSidecars.Add(sidecarPath, sidecar);
                 }
                 else if (!EqualsIgnoreCase(origin, "tracked-baseline"))
@@ -22645,7 +22757,10 @@ namespace OpennessLLM
             string sidecarNumberMode = SidecarValue(sidecar, "numberMode");
             if (hasSidecar)
             {
-                number = sidecarNumber;
+                string sidecarOrigin = SidecarValue(sidecar, "sourceOrigin");
+                bool trackedBaselineSidecar = EqualsIgnoreCase(sidecarOrigin, "tracked-baseline")
+                    && !string.IsNullOrWhiteSpace(SidecarValue(sidecar, "softwarePath"));
+                number = FirstNonEmpty(sidecarNumber, trackedBaselineSidecar ? number : string.Empty);
             }
 
             bool manualNumberFromFile = !hasSidecar && !string.IsNullOrWhiteSpace(number);
@@ -23983,6 +24098,7 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "sync-clone-source-sidecar-unit", SelfTestSyncCloneSourceSidecarUnit);
             RunSelfTestCase(results, outDir, "sync-clone-marker-rollback", SelfTestSyncCloneMarkerRollback);
             RunSelfTestCase(results, outDir, "apply-clone-selective-dirty-gate", SelfTestApplyCloneSelectiveDirtyGate);
+            RunSelfTestCase(results, outDir, "clone-tracked-rename-reconciliation", SelfTestCloneTrackedRenameReconciliation);
             RunSelfTestCase(results, outDir, "apply-clone-post-write-path-transitions", SelfTestApplyClonePostWritePathTransitions);
 
             WriteSelfTestReports(outDir, results);
@@ -25582,6 +25698,7 @@ namespace OpennessLLM
                 new List<ExplicitNewPromotionReceipt> { receipt });
             AssertTrue(promoted == 1, "a successful CreateBlock receipt plus matching exported content must promote explicit-new provenance exactly once");
             AssertEqual("tracked-baseline", SidecarValue(LoadSidecarMetadata(sourcePath), "sourceOrigin"), "one-shot sidecar origin must be consumed after promotion");
+            AssertEqual("31", SidecarValue(LoadSidecarMetadata(sourcePath), "number"), "promotion must persist the assigned live number in the tracked sidecar");
             AssertEqual("tracked-baseline", LoadCloneBlockManifest(cloneDir, rootDir)[0].Provenance, "promoted source must be represented by the tracked manifest");
 
             File.Delete(Path.Combine(cloneDir, "plc-blocks.csv"));
@@ -26308,6 +26425,77 @@ namespace OpennessLLM
                 "10_NewName.scl",
                 "NewName",
                 "10");
+        }
+
+        private static void SelfTestCloneTrackedRenameReconciliation(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string oldPath = Path.Combine(rootDir, "1_OldName.scl");
+            string renamedPath = Path.Combine(rootDir, "1_NewName.scl");
+            WriteTextFile(renamedPath, "FUNCTION_BLOCK \"NewName\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(
+                renamedPath + ".meta.json",
+                "{\"sourceOrigin\":\"tracked-baseline\",\"softwarePath\":\"PLC\",\"autoNumber\":\"true\",\"numberMode\":\"Auto\"}\n");
+            WriteCsv(
+                Path.Combine(cloneDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "AutoNumber", "NumberMode", "NumberSpace", "ProgrammingLanguage", "TypeName", "FilePath", "Status", "SourceOrigin" },
+                new[]
+                {
+                    new[] { "PLC", string.Empty, "OldName", "1", "True", "Auto", "FB", "SCL", "Siemens.Engineering.SW.Blocks.FB", oldPath, "ok", "exported-source" }
+                });
+
+            List<CloneBlockRecord> cloneRecords = LoadCloneBlockManifest(cloneDir, rootDir);
+            AssertEqual("1", cloneRecords.Count.ToString(CultureInfo.InvariantCulture), "a unique moved tracked source must replace its missing manifest-path record");
+            CloneBlockRecord renamed = cloneRecords[0];
+            AssertEqual("NewName", renamed.Name, "renamed source name must come from source text");
+            AssertEqual("1", renamed.Number, "tracked sidecar without number must retain the canonical filename number");
+            AssertEqual("PLC", renamed.SoftwarePath, "moved tracked source must retain manifest PLC scope");
+            AssertEqual("tracked-baseline", renamed.Provenance, "unique moved source must retain tracked provenance");
+
+            string currentPath = Path.Combine(caseDir, "CURRENT", "1_OldName.scl");
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"OldName\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            CloneBlockRecord current = new CloneBlockRecord
+            {
+                SoftwarePath = "PLC",
+                GroupPath = string.Empty,
+                GroupPathDisplay = string.Empty,
+                Name = "OldName",
+                Number = "1",
+                AutoNumber = "True",
+                NumberMode = "Auto",
+                NumberSpace = "FB",
+                ProgrammingLanguage = "SCL",
+                BlockType = "FB",
+                TypeName = "Siemens.Engineering.SW.Blocks.FB",
+                SourceTypeName = "Siemens.Engineering.SW.Blocks.FB",
+                RelativePath = "1_OldName.scl",
+                ClonePath = oldPath,
+                CurrentPath = currentPath,
+                ExportStatus = "ok"
+            };
+            List<CloneDiffRecord> diffs = BuildCloneBlockDiffs(cloneRecords, new List<CloneBlockRecord> { current });
+            AssertEqual("1", diffs.Count.ToString(CultureInfo.InvariantCulture), "tracked rename must produce one diff row");
+            AssertEqual("moved-or-renamed-and-changed", diffs[0].Status, "tracked rename must not split into delete/create rows");
+
+            string unsafeDir = Path.Combine(caseDir, "EXPLICIT_NEW");
+            string unsafeRoot = Path.Combine(unsafeDir, "_root");
+            string unsafeOldPath = Path.Combine(unsafeRoot, "1_OldName.scl");
+            string unsafeNewPath = Path.Combine(unsafeRoot, "1_NewName.scl");
+            WriteTextFile(unsafeNewPath, "FUNCTION_BLOCK \"NewName\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(
+                unsafeNewPath + ".meta.json",
+                "{\"sourceOrigin\":\"explicit-new-local-source\",\"softwarePath\":\"PLC\",\"number\":\"1\",\"numberMode\":\"Manual\"}\n");
+            WriteCsv(
+                Path.Combine(unsafeDir, "plc-blocks.csv"),
+                new[] { "SoftwarePath", "GroupPath", "Name", "Number", "NumberSpace", "ProgrammingLanguage", "TypeName", "FilePath", "Status", "SourceOrigin" },
+                new[]
+                {
+                    new[] { "PLC", string.Empty, "OldName", "1", "FB", "SCL", "Siemens.Engineering.SW.Blocks.FB", unsafeOldPath, "ok", "exported-source" }
+                });
+            List<CloneBlockRecord> unsafeRecords = LoadCloneBlockManifest(unsafeDir, unsafeRoot);
+            AssertTrue(unsafeRecords.Any(x => EqualsIgnoreCase(x.Provenance, "explicit-new-local-source")), "explicit-new source must remain pending and must never adopt a missing tracked identity");
+            AssertTrue(unsafeRecords.Any(x => EqualsIgnoreCase(x.Provenance, "tracked-baseline") && !CloneSourceFileExists(x)), "explicit-new source must not consume the missing tracked manifest record");
         }
 
         private static void SelfTestApplyClonePostWritePathTransition(
