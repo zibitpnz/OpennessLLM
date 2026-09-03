@@ -157,7 +157,7 @@ hmi-project-texts-apply
 Реальная запись:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply --save
 ```
 
 Почему это важно:
@@ -191,7 +191,9 @@ Backup не заменяет preflight. Backup нужен как rollback safety
 
 ## 5. Save gate
 
-`--apply` и `--save` разделены.
+Для большинства команд `--apply` и `--save` разделены. Исключение —
+`apply-clone`: его baseline публикуется только после сохранения TIA, поэтому
+real apply требует оба флага.
 
 ```text
 --apply  Выполнить действие в открытом TIA проекте.
@@ -206,7 +208,8 @@ compile может изменить state без необходимости не
 post-apply gates могут rejected результат, и тогда save не должен происходить.
 ```
 
-Правило: использовать `--save` только когда результат принят.
+Правило: `apply-clone` сам принимает staged post-check до вызова SaveProject;
+для остальных команд использовать `--save` только когда результат принят.
 
 ## 6. PLC clone baseline gate
 
@@ -230,6 +233,12 @@ InstanceOfName для Instance DB.
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --out .\CLONE_PROJECT
 ```
+
+`check-clone` выполняется после любых изменений source, sidecar или manifest.
+Schema 3 связывает bundle с полным отсортированным workspace inventory; edit,
+add, delete и rename после check отклоняются до TIA write. Реальный apply требует
+`--apply --save`, а неполный `--name`/`--group` selection запрещён при наличии
+других dirty rows.
 
 Если baseline dirty, `apply-clone` должен остановиться или показать issues.
 
@@ -316,7 +325,8 @@ Loose-файл в `_root` без точного sidecar
 row counts, SHA-256, точный `_compare` directory, нормализованный путь проекта,
 версию проекта, стабильный project object ID при его доступности и выбранный
 набор `SoftwarePath`. `apply-clone` сверяет target identity с открытым проектом
-до построения плана и любой TIA-записи. Bundle schema 1 для записи больше не
+и полный workspace inventory до построения плана и любой TIA-записи. Старые
+bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 
 `init-clone` и `check-clone` требуют ровно один выбранный `PlcSoftware`; в
@@ -328,7 +338,7 @@ multi-PLC проекте read-only clone нужно ограничить чер�
 `explicit-new-local-source` — одноразовое состояние. Совпадение metadata само
 по себе не расходует его: нужен receipt успешного `CreateBlock`, связанный с
 check run, выбранным PLC, target identity, source hash/language и live object.
-Экспортированный live source обязан совпасть по языку и normalized hash.
+Экспортированный live source обязан совпасть по языку и canonical hash.
 Дубликаты в batch отклоняются до sidecar mutation; sidecar и manifest меняются
 через восстанавливаемый `_manifest-publish`. Если manifest позже потерян,
 consumed sidecar даёт `unknown-orphaned`.
@@ -576,7 +586,7 @@ clone-check-blocks.csv
 apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
-apply-clone-gates.csv
+apply-clone-gate.csv
 ```
 
 Перед `hmi-project-texts-apply --apply`:

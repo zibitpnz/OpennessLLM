@@ -410,10 +410,11 @@ write workflow. Он получает export/source blocker status.
 4. Читает clone metadata baseline.
 5. Читает текущие files в CLONE_PROJECT\_root.
 6. Сравнивает baseline, live TIA и clone files.
-7. Пишет block/group/source-blocker/summary reports во временный staging.
+7. Пишет block/group/source-blocker/workspace-inventory/summary reports во временный staging.
 8. Atomic replace публикует отчёты, затем последним записывает
    `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
-   compare directory, normalized project identity и выбранным `SoftwarePath`.
+   compare directory, normalized project identity, выбранным `SoftwarePath` и
+   хешами всех source/sidecar/manifest/metadata файлов.
 9. `apply-clone` / `sync-clone` принимают только полностью проверенный bundle.
 ```
 
@@ -520,10 +521,12 @@ Pipeline:
 10. Создать backup, если требуется.
 11. Проверить live source drift для изменяемых blocks.
 12. Применить операции через TIA SDK / External Sources.
-13. Зафиксировать lifecycle metadata: consume explicit-new только по receipt
-    успешного CreateBlock и завершённые deletes только по preflight manifest receipt.
-14. Запустить post-check reports.
-15. Сохранить проект только при --save и accepted result.
+13. Проверить результат в изолированной копии workspace: post-check, staged
+    sync, затем второй полностью чистый post-check.
+14. Перестроить source paths/manifests/metadata только в staging.
+15. Сохранить TIA проект (real apply без --save запрещён).
+16. Транзакционно опубликовать `_root`, manifests и metadata с rollback backup.
+17. Только после save/publish выпустить свежий authorization bundle.
 ```
 
 Ключевые отчеты:
@@ -533,10 +536,12 @@ apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
 apply-clone-summary.txt
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-operations.csv
-_metadata\apply-clone-preflight-plan.jsonl
-_metadata\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-preflight-plan.jsonl
+_apply-reports\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-gate.jsonl
+_apply-reports\apply-clone-operations.jsonl
 ```
 
 ## 14. apply-clone plan: какие операции распознаются
@@ -552,7 +557,7 @@ Noop             Нет изменений.
 Blocked          Небезопасная или неподдержанная ситуация.
 ```
 
-Новые блоки могут задавать metadata через sidecar:
+Новые блоки обязаны задавать metadata через sidecar:
 
 ```text
 MyNewBlock.scl
@@ -583,7 +588,7 @@ sourceOrigin
 Это one-shot provenance: `check-clone` сам по совпадению metadata ничего не
 промоутит. Только успешный `CreateBlock` создаёт receipt с check run ID,
 SoftwarePath, target identity, source hash/language и live object identity.
-Экспортированный live source обязан совпасть по language и normalized hash.
+Экспортированный live source обязан совпасть по language и canonical hash.
 One-to-one batch затем через восстанавливаемый `_manifest-publish` переводит
 sidecar в `tracked-baseline` и публикует manifest. При последующей потере
 manifest такой source становится `unknown-orphaned`, а не снова explicit-new.
@@ -598,8 +603,8 @@ inventory-only-unsupported     source никогда не создавался �
 Изменение одного mutable `Status` не стирает историю. Legacy или
 противоречивые missing-source строки становятся `unknown-orphaned`.
 
-Если sidecar отсутствует, numeric prefix filename может означать manual block
-number.
+Если sidecar отсутствует, numeric prefix filename может быть распознан как
+manual number для диагностики, но CreateBlock не разрешается.
 
 ## 15. PLC checks внутри apply-clone
 
@@ -943,7 +948,7 @@ clone-check-blocks.csv
 clone-check-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-summary.txt
 ```
 

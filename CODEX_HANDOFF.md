@@ -54,13 +54,17 @@ Production PLC writes go through guarded clone source workflow:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+REM Edit/add/delete/rename source and sidecar files, then refresh the bundle:
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-`apply-clone --apply` keeps the existing safety gates: clean baseline,
+`apply-clone --apply --save` keeps the existing safety gates: clean baseline,
 source-blocker gate, stale source gate, backup requirement, after-apply check,
-and explicit `--apply` protection.
+workspace inventory binding, and explicit `--apply` protection. Clone-only
+sources require a sidecar with `softwarePath` and
+`sourceOrigin=explicit-new-local-source`.
 
 When a block is added manually in TIA Portal and then accepted with
 `check-clone`/`sync-clone`, version `0.12.2` keeps `SoftwarePath` populated in

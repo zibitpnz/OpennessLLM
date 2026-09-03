@@ -646,6 +646,7 @@ CLONE_PROJECT\plc-blocks.csv
 CLONE_PROJECT\clone-check-blocks.csv
 CLONE_PROJECT\clone-check-groups.csv
 CLONE_PROJECT\clone-check-source-blockers.csv
+CLONE_PROJECT\clone-check-workspace.csv
 CLONE_PROJECT\clone-check-summary.txt
 CLONE_PROJECT\clone-check-bundle.json
 CLONE_PROJECT\_metadata\clone-manifest.json
@@ -675,9 +676,11 @@ unsupported
 ```
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
-Текущий bundle schema 2 привязан к normalized project path, версии проекта,
+Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
+Текущий bundle schema 3 привязан к normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
-Bundle от другого проекта или schema 1 отклоняется до построения apply plan.
+Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata
+файлов. Bundle от другого проекта или старой schema отклоняется до apply plan.
 Проверка единственного PLC и `ExternalSourceGroup` выполняется до invalidation
 существующего bundle и до создания compare/staging файлов.
 
@@ -696,8 +699,12 @@ source. Для tracked deletion исходная manifest identity и ровно
 проверяются до первой TIA-записи; TIA-only deletion не требует строку manifest.
 Pending `explicit-new-local-source` разрешает только `CreateBlock`. Он становится
 tracked лишь по receipt успешного создания и совпадению экспортированного live
-source по language/normalized hash; существующий одноимённый блок не принимается
+source по language/canonical hash; существующий одноимённый блок не принимается
 автоматически.
+
+Для clone-only source обязателен валидный flat JSON sidecar с непустым
+`softwarePath` и `sourceOrigin=explicit-new-local-source`. Filename prefix без
+sidecar не является разрешением на создание.
 
 Dry-run:
 
@@ -708,9 +715,12 @@ Dry-run:
 Реальное применение:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
+
+Реальный `--apply` без `--save` отклоняется до первой TIA-записи. Фильтры
+`--name`/`--group` также отклоняются, если в том же свежем bundle остаются
+другие dirty rows: частичный apply не может пройти глобальную post-check.
 
 Поддерживает:
 
@@ -741,10 +751,12 @@ apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
 apply-clone-summary.txt
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-operations.csv
-_metadata\apply-clone-preflight-plan.jsonl
-_metadata\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-preflight-plan.jsonl
+_apply-reports\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-gate.jsonl
+_apply-reports\apply-clone-operations.jsonl
 ```
 
 ## 7. PLC export and diagnostics

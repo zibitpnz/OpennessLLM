@@ -176,7 +176,9 @@ unsupported-language inventory row (`inventory-only-unsupported`); legacy or
 contradictory missing-source rows fail closed as `unknown-orphaned`.
 `apply-clone` refuses to
 write if a clone source file changed after the latest `check-clone`; run
-`check-clone` again before applying.
+`check-clone` again after every edit, add, delete, rename, sidecar change, or
+manifest change and before applying. A real apply always requires both
+`--apply` and `--save`.
 
 `init-clone` and `sync-clone` also write machine-readable metadata under
 `CLONE_PROJECT\_metadata`: `clone-manifest.json`, `blocks.jsonl`,
@@ -221,7 +223,8 @@ unsafe output masks above 24 bits for the supported output modules.
 
 `apply-clone` always runs a strict preflight first, including dry-runs. It writes
 `apply-clone-preflight-summary.txt`, `apply-clone-preflight-plan.csv`,
-`apply-clone-preflight-issues.csv`, and JSONL projections under `_metadata`.
+`apply-clone-preflight-issues.csv`, and JSONL projections under
+`_apply-reports` (kept outside the hash-bound baseline `_metadata`).
 If any preflight issue has severity `error`, `--apply` stops before the first
 TIA write. On real `--apply`, the preflight also exports the live TIA source for
 existing blocks that will be changed/renamed/deleted and compares it with
@@ -229,19 +232,20 @@ existing blocks that will be changed/renamed/deleted and compares it with
 check, apply is refused.
 
 `check-clone` publishes `clone-check-blocks.csv`,
-`clone-check-groups.csv`, `clone-check-source-blockers.csv`, and the summary as
+`clone-check-groups.csv`, `clone-check-source-blockers.csv`,
+`clone-check-workspace.csv`, and the summary as
 one evidence bundle committed by `clone-check-bundle.json`. `apply-clone` and
 `sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
 or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
 the marker and rechecks current-source hashes before changing `_root`. Bundle
-schema 2 also binds the normalized TIA project path, project version, stable
-project object identifier when available, and the selected `SoftwarePath` set.
+schema 3 also binds the normalized TIA project path, project version, stable
+project object identifier when available, the selected `SoftwarePath` set, and
+a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
 `apply-clone` validates all of these against the open project before constructing
-a plan or invoking any TIA write method. A schema-1 bundle must be refreshed by
-running `check-clone` again.
+a plan or invoking any TIA write method. Any pre-schema-3 bundle must be
+refreshed by running `check-clone` again.
 
-For new clone-only blocks, an optional sidecar file can be placed next to the
-source file:
+Every new clone-only block must have a sidecar file next to the source file:
 
 ```text
 MyNewBlock.scl
@@ -250,10 +254,10 @@ MyNewBlock.scl.meta.json
 
 Supported flat sidecar fields are `blockKind`, `numberMode`, `number`,
 `autoNumber`, `programmingLanguage`, `name`, `instanceOfName`, `softwarePath`,
-and `sourceOrigin`. When a
-sidecar exists, it wins over the filename numeric prefix. Without a sidecar,
-the old shorthand still works: a numeric prefix on a clone-only filename means
-"request this manual block number".
+and `sourceOrigin`. The sidecar wins over the filename numeric prefix and must
+contain nonempty `softwarePath` plus
+`"sourceOrigin":"explicit-new-local-source"`. A filename numeric prefix alone
+does not authorize creation.
 
 A source discovered outside `plc-blocks.csv` has fail-closed
 `unknown-orphaned` provenance. To assert that it is intentionally new local
@@ -265,7 +269,8 @@ remain `unknown-orphaned`. This origin is one-shot: only a successful
 `CreateBlock` operation can issue a promotion receipt. The receipt binds the
 check run, selected PLC, target identity, source hash, language, and resulting
 live object; promotion additionally requires an exportable live source with the
-same normalized content. A pre-existing same-identity block is not adopted.
+same canonical content (formatting-only differences are allowed). A
+pre-existing same-identity block is not adopted.
 The recoverable `_manifest-publish` transaction rewrites the sidecar origin to
 `tracked-baseline` and publishes the manifest as one transition. Recovery
 validates the complete journal, staged manifest, sources, identities, and every
@@ -317,7 +322,7 @@ PLC source edits should go through the guarded clone workflow:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply --save
 ```
 
 Compile one PLC block and print recursive TIA compiler diagnostics:

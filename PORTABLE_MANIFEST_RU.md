@@ -104,7 +104,7 @@ C:\TIA_HMI_IMPORT_PROBE
 
 ```cmd
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Инструмент больше не генерирует PLC XML для записи в проект.

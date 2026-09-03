@@ -4,13 +4,15 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
-- `check-clone` now publishes its block, group, source-blocker, and summary
-  reports as one fail-closed evidence bundle. `clone-check-bundle.json` is
+- `check-clone` now publishes its block, group, source-blocker, complete sorted
+  workspace inventory, and summary reports as one fail-closed evidence bundle.
+  `clone-check-bundle.json` is
   committed last and binds a schema version, `CheckRunId`, row counts, hashes,
   the exact compare directory, normalized project path, project version, stable
   project object identifier when available, and selected `SoftwarePath` set.
   `apply-clone` / `sync-clone` reject missing, interrupted, tampered, cross-run,
-  or wrong-project bundles before mutation. This target binding is schema 2;
+  or wrong-project bundles before mutation. Schema 3 also binds every source,
+  sidecar, PLC manifest, and `_metadata` file by relative path, size, and hash;
   older bundles require a fresh `check-clone`.
 - `apply-clone` now resolves its TIA write target from the validated bundle and
   fails closed before plan construction when the open project contains more
@@ -19,7 +21,7 @@ All notable changes to OpennessLLM are recorded in this file.
 - `explicit-new-local-source` is now a one-shot origin promoted only by a
   successful `CreateBlock` receipt bound to the check run, selected PLC, target
   identity, source hash/language, and resulting live object. Promotion also
-  requires an exportable live source with equal normalized content; metadata-only
+  requires an exportable live source with equal canonical content; metadata-only
   adoption of a pre-existing block is forbidden. The one-to-one promotion batch
   and sidecar/manifest publication use a recoverable `_manifest-publish`
   transaction. Recovery validates the complete batch before changing any
@@ -31,6 +33,12 @@ All notable changes to OpennessLLM are recorded in this file.
   identity and proves exactly one row before any TIA write; the former consumes
   none. A successfully completed tracked deletion removes only its proven row
   before the post-apply check.
+- Real `apply-clone` now requires `--save`, rejects partial dirty selections,
+  stages exact checked source bytes, performs post-write check/sync/check in an
+  isolated workspace, saves TIA, then transactionally publishes `_root`,
+  manifests, and regenerated metadata. Auto-number, rename, delete, and
+  TIA-formatting transitions therefore cannot mutate the durable baseline before
+  acceptance and save. A fresh authorization bundle is published only last.
 - `sync-clone` no longer guesses the newest `_compare` directory; it consumes
   the directory bound to the validated bundle and verifies current-source
   hashes before copying. It stages a complete replacement `_root`, manifests,
@@ -70,10 +78,9 @@ All notable changes to OpennessLLM are recorded in this file.
 - Clone matching and ambiguity checks are scoped by `SoftwarePath`; missing
   software scope fails closed where identities could overlap. Loose sources do
   not inherit the first manifest software path, and explicit-new provenance
-  requires a nonempty sidecar `softwarePath`. A loose source without a sidecar
-  may match one uniquely corresponding live relative path after creation while
-  retaining unknown clone scope; multiple live scope candidates remain
-  unmatched and fail closed.
+  requires a nonempty sidecar `softwarePath`. Clone-only creation additionally
+  requires `sourceOrigin=explicit-new-local-source`; a numeric filename prefix
+  without the sidecar is diagnostic metadata, not write authorization.
 - Safety-critical origin metadata is accepted only from a complete, valid flat
   JSON sidecar. Malformed/nested sidecars, invalid JSON escapes, and unescaped
   control characters remain `unknown-orphaned`; JSON whitespace, literals, and

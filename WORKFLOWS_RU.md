@@ -206,16 +206,22 @@ CLONE_PROJECT\hmi-check-summary.txt
 CLONE_PROJECT\_root\...
 ```
 
-Шаг 4. Dry-run:
+Шаг 4. После изменения заново выпустить bundle:
+
+```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+```
+
+Шаг 5. Dry-run:
 
 ```cmd
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Шаг 5. Если preflight clean, применить:
+Шаг 6. Если preflight clean, применить и сохранить:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Шаг 6. Скомпилировать:
@@ -278,10 +284,10 @@ CLONE_PROJECT\_root\120_MyNewBlock.scl
 CLONE_PROJECT\_root\MyNewBlock.scl
 ```
 
-Шаг 3. При необходимости добавить sidecar:
+Шаг 3. Обязательно добавить sidecar:
 
 ```text
-CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
+CLONE_PROJECT\_root\120_MyNewBlock.scl.meta.json
 ```
 
 Пример:
@@ -301,21 +307,23 @@ CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
 Для нового loose source задавайте точное
 `sourceOrigin=explicit-new-local-source`. Без него происхождение считается
 `unknown-orphaned` и при неоднозначности source-blocker gate завершится fail
-closed.
+closed. Непустой `softwarePath` обязателен; числовой префикс имени файла без
+этого sidecar не разрешает создание блока.
 
 `explicit-new-local-source` используется один раз. Обычный `check-clone` не
 промоутит source только из-за совпадения имени/номера. После успешного
 `CreateBlock` инструмент создаёт receipt, повторно экспортирует live source и
-требует совпадения language и normalized hash. Только затем восстанавливаемая
+требует совпадения language и canonical hash. Только затем восстанавливаемая
 транзакция меняет sidecar origin на `tracked-baseline` и публикует строку в
 `plc-blocks.csv`. Не возвращайте marker обратно вручную: после применения блок
 уже является tracked baseline.
 
-Шаг 4. Dry-run и apply:
+Шаг 4. После создания source и sidecar заново выполнить check, затем dry-run и apply:
 
 ```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Шаг 5. Compile и check:
@@ -341,6 +349,12 @@ workflow.
 Переименовать source file в `CLONE_PROJECT\_root\...` и, если нужно, обновить
 имя внутри source text.
 
+После rename заново выпустить bundle:
+
+```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+```
+
 Dry-run:
 
 ```cmd
@@ -350,7 +364,7 @@ Dry-run:
 Apply:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Потом:
@@ -376,8 +390,9 @@ Apply:
 Удалить файл из `CLONE_PROJECT\_root\...`.
 
 ```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 .\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
