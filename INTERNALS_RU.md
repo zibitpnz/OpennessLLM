@@ -404,8 +404,9 @@ write workflow. Он получает export/source blocker status.
 Под капотом:
 
 ```text
-1. Собирает live inventory.
-2. Экспортирует live source для блоков, где это возможно.
+1. Берёт workspace lock, аннулирует старый marker и получает `TiaPortal.ExclusiveAccess`.
+2. Требует `Project.IsModified=false`, собирает live inventory и экспортирует live
+   source для блоков, где это возможно, не отпуская exclusive lease.
 3. Считает live source SHA-256.
 4. Читает clone metadata baseline.
 5. Читает текущие files в CLONE_PROJECT\_root.
@@ -415,12 +416,14 @@ write workflow. Он получает export/source blocker status.
    `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
    compare directory, normalized project identity, выбранным `SoftwarePath` и
    хешами всех source/sidecar/manifest/metadata файлов.
-9. `apply-clone` / `sync-clone` принимают только полностью проверенный bundle.
+9. Повторно требует clean project и стабильный полный inventory; только затем
+   `apply-clone` / `sync-clone` могут принять bundle.
 ```
 
-До invalidation старого bundle и создания `_compare` команда проверяет, что
-выбран ровно один `PlcSoftware` и у него доступен `ExternalSourceGroup`. Ошибка
-scope поэтому не меняет существующий workspace.
+Старый marker аннулируется до попытки получить authoritative evidence. Ошибка
+attach, `ExclusiveAccess`, scope, inventory или source export поэтому не может
+оставить старый bundle пригодным для последующей записи. Immutable snapshot в
+`%TEMP%` принадлежит lease и удаляется как при успехе, так и при исключении.
 
 Типовые статусы:
 
@@ -620,10 +623,12 @@ LAD/FBD/GRAPH не подтвержден;
 metadata неполная.
 ```
 
-### Stale source check
+### Complete authoritative pre-state check
 
-Перед real apply инструмент повторно экспортирует live source для изменяемых
-блоков и сравнивает SHA с `CurrentSourceSha256` из последнего `check-clone`.
+Перед real apply инструмент повторно сверяет полный набор и metadata всех
+live blocks/groups и экспортирует source каждого поддерживаемого блока, включая
+не выбранные планом. Каждый SHA сравнивается с `CurrentSourceSha256` из последнего
+`check-clone`. Доступный `TiaObjectId` также обязан совпасть.
 
 Если отличается:
 
@@ -632,6 +637,18 @@ TIA изменился после check-clone;
 clone apply может потереть чужую/ручную правку;
 apply блокируется.
 ```
+
+Если ObjectIdentifierProvider недоступен или возвращает пустой ID, это явно
+фиксируется как `unproven`: логическая identity, metadata и все source hashes
+остаются обязательными. Если ID доступен, Update/Rename обязаны сохранить его,
+Delete — удалить, а Create — получить ID, которого не было в pre-state.
+
+Временные `ExternalSource` удаляются строгим `Delete()`. Ошибка generation и
+cleanup сохраняется как aggregate failure; присутствие временного source после
+Delete или изменение полного ExternalSource set запрещает переход к Save.
+Canonical source включает нормализованные комментарии: comment-only edit — это
+изменение документации, а не formatting. Для pure rename ожидаемый source берётся
+из immutable staging свежего pre-write экспорта, а не из mutable `_compare`.
 
 ### Duplicate number check
 

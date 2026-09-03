@@ -4,6 +4,26 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Authoritative `check-clone`, `init-workspace`, and bundle-producing
+  `status` / `check-all` collection now runs under one
+  `TiaPortal.ExclusiveAccess` lease, requires a clean project before and after
+  export, and invalidates the old marker before collection starts. A failed
+  attach, scope check, inventory, export, or final stability check therefore
+  cannot leave stale write authorization. TEMP workspace snapshots are
+  lease-owned and cleaned on every exit path.
+- Real `apply-clone` now compares the complete current-side block/group set,
+  full metadata, and every exportable live source hash with the checked bundle
+  before its first write, including unselected blocks. Available TIA object IDs
+  must match pre-state and satisfy Create/Update/Rename/Delete continuity;
+  unavailable IDs are explicitly reported as unproven under the documented
+  fail-closed metadata/source policy.
+- Temporary External Sources now use mandatory `Delete()` plus absence and
+  complete-collection checks. Generation and cleanup failures are aggregated,
+  and any cleanup failure prevents `SaveProject`. Pure rename content evidence
+  is copied from the fresh live export into immutable apply staging.
+- `init-workspace --force` treats the active `.opennessllm-workspace.lock` as a
+  trusted control file, neither rejecting it as unknown nor moving it into a
+  generated-artifact backup.
 - `check-clone` now publishes its block, group, source-blocker, complete sorted
   workspace inventory, and summary reports as one fail-closed evidence bundle.
   `clone-check-bundle.json` is
@@ -107,9 +127,10 @@ All notable changes to OpennessLLM are recorded in this file.
   control characters remain `unknown-orphaned`; JSON whitespace, literals, and
   numbers use their case-sensitive, ASCII-digit standard grammar.
 - Canonical SCL/STL equality now serializes a language-aware token stream instead
-  of deleting whitespace/comments. Token kinds and boundaries, literals,
-  doubled quotes, pragmas/attributes, operators, and STL operands remain distinct;
-  unterminated strings/comments fail closed.
+  of deleting whitespace/comments. Normalized comments are significant canonical
+  content, so comment-only edits cannot be silently discarded. Token kinds and
+  boundaries, literals, doubled quotes, pragmas/attributes, operators, and STL
+  operands remain distinct; unterminated strings/comments fail closed.
 - A structurally conflicting `added` + `removed` pair that may identify the
   same block (including an unscoped orphan paired with a scoped live block) now
   invalidates the evidence bundle before apply/sync mutation. Distinct report
@@ -156,11 +177,18 @@ All notable changes to OpennessLLM are recorded in this file.
   cross-process locking, complete-report export errors, exact postconditions,
   collateral reconciliation rejection, canonical token adversaries, final sync
   fingerprinting, stale sidecar normalization, and the dirty-project gate.
-- Verification result: `self-test` passed `62/62`.
+- Verification result: `self-test` passed `68/68`.
 - Live TIA Portal V21 validation passed the complete auto-number CreateBlock,
   UpdateSource, RenameAndUpdateSource, and DeleteBlock lifecycle. Every mutation
   satisfied exact postconditions, compiled with zero errors/warnings, saved, and
   ended with a clean schema-4 post-save bundle and no temporary block remaining.
+- The hardened build additionally passed an authoritative clean `check-clone`
+  and a comment-only `UpdateSource` round trip in TIA Portal V21. The recorded
+  complete pre-state was `blocks=2; groups=1; sources=1; errors=0`; exact and
+  collateral postconditions passed, unavailable object IDs were explicitly
+  reported as `unproven`, compile completed `targets=1; errors=0; warnings=0`,
+  Save succeeded, the published bundle was clean, and apply/TEMP staging was
+  empty afterward.
 
 ## 0.12.3 - 2026-08-27
 

@@ -684,8 +684,11 @@ unsupported
 workspace сверяется непосредственно перед marker publication. Bundle от другого
 проекта или старой schema отклоняется до apply plan. Clone-команды держат
 эксклюзивный `.opennessllm-workspace.lock` внутри workspace.
-Проверка единственного PLC и `ExternalSourceGroup` выполняется до invalidation
-существующего bundle и до создания compare/staging файлов.
+`check-clone` теперь является авторитетной snapshot-операцией: он требует
+`Project.IsModified=false` и держит `TiaPortal.ExclusiveAccess` от сбора полного
+live inventory до экспорта всех source и публикации marker. Старый marker
+аннулируется до начала этого сбора; любая ошибка оставляет bundle непригодным для
+записи. Временный immutable snapshot удаляется и при успехе, и при исключении.
 
 ### apply-clone
 
@@ -733,8 +736,16 @@ Real apply держит `TiaPortal.ExclusiveAccess` от preflight до post-sav
 
 До первой записи полный block/group report допускает только `unchanged`, все
 actionable rows из immutable plan и доказанные informational current-only rows.
+Кроме этого, в той же `ExclusiveAccess`-сессии повторно сверяются полный набор и
+metadata всех live blocks/groups, а также SHA-256 каждого экспортируемого source,
+включая блоки вне плана. Доступные TIA object IDs обязаны совпасть; отсутствие ID
+явно отражается warning-состоянием `unproven`. Временный `ExternalSource` удаляется
+строго: ошибка `Delete()` или остаток в коллекции запрещает `SaveProject`.
 После записи проверяются точные postconditions каждого Create/Update/Rename/Delete,
-полный состав blocks/groups и language-aware SCL/STL token stream. Reconciliation
+полный состав blocks/groups, доступная object-ID continuity и language-aware
+SCL/STL token stream. Комментарии входят в canonical content, поэтому
+comment-only правка не считается formatting. Pure rename сравнивается с
+immutable-копией свежего pre-write экспорта. Reconciliation
 ограничена ожидаемыми formatting/assigned-number/rename/sidecar/manifest
 переходами. Затем `apply-clone` запускает самый широкий доступный compile,
 требует zero errors, получает свежие clean pre-save и post-save snapshots,

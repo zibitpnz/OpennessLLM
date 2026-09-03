@@ -336,7 +336,12 @@ row counts, SHA-256, точный `_compare` directory, нормализован
 inventory строятся из одного immutable snapshot локальных файлов, clone source
 hash сверяются с ним, а live workspace повторно проверяется непосредственно до
 публикации marker. `.opennessllm-workspace.lock` внутри clone исключает обход
-межпроцессной блокировки регистром пути или обычным alias. Старые
+межпроцессной блокировки регистром пути или обычным alias и считается доверенным
+control file при `init-workspace --force`, поэтому не попадает в backup move.
+`check-clone` держит `TiaPortal.ExclusiveAccess` на всём authoritative interval,
+требует clean project до/после экспорта и аннулирует старый marker до начала
+сбора: любая ошибка оставляет write authorization отсутствующим. TEMP snapshot
+удаляется lease-ом на всех путях выхода. Старые
 bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 
@@ -387,6 +392,14 @@ reconciliation. Затем он компилирует самый широкий
 pre-save и post-save inventory/check должны оставаться чистыми и стабильными.
 Отдельный `compile-all --apply` нужен только для диагностики либо изменений вне
 clone workflow.
+
+До первой записи сверяется не только выбранный план: полный current-side набор,
+metadata и source hashes всех экспортируемых PLC blocks/groups должны совпасть с
+bundle под той же `ExclusiveAccess`. Доступные TIA object IDs обязательны для
+pre-state и Create/Update/Rename/Delete continuity; недоступные IDs явно
+помечаются `unproven`. Комментарии являются частью canonical content. Pure rename
+использует immutable pre-write source. Ошибка удаления временного ExternalSource,
+его остаток или изменение полного ExternalSource set запрещают `SaveProject`.
 
 Для LAD/FBD/GRAPH действует дополнительная осторожность. Нужна явная проверка
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это

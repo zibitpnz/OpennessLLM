@@ -238,17 +238,23 @@ unsafe output masks above 24 bits for the supported output modules.
 `apply-clone-preflight-issues.csv`, and JSONL projections under
 `_apply-reports` (kept outside the hash-bound baseline `_metadata`).
 If any preflight issue has severity `error`, `--apply` stops before the first
-TIA write. On real `--apply`, the preflight also exports the live TIA source for
-existing blocks that will be changed/renamed/deleted and compares it with
-`CurrentSourceSha256` from the latest `check-clone`; if TIA changed after the
-check, apply is refused. The complete block/group reports are gated before any
-mutation: only unchanged rows, all planned actionable rows, and proven
-informational current-only blockers are accepted.
+TIA write. On real `--apply`, the preflight revalidates the complete current
+PLC block/group set and metadata, and re-exports every exportable live source,
+including blocks outside the apply plan. Every source hash must still match the
+latest `check-clone`; a saved or unsaved unplanned TIA edit therefore blocks the
+apply before mutation. TIA object identifiers are also required to remain
+continuous whenever the SDK provides them; unavailable identifiers are
+explicitly reported as unproven rather than silently treated as proof.
 
-After writing, each action must satisfy its exact block identity and token-stream
-source postcondition, and the complete block/group sets must contain no
-collateral change. Only plan-explained formatting, assigned-number, rename,
-sidecar, and manifest transitions may be reconciled. `apply-clone` then compiles
+After writing, each action must satisfy its exact block identity, available
+object-ID continuity, and token-stream source postcondition, and the complete
+block/group sets must contain no collateral change. Source comments are part of
+the accepted content contract, so comment-only edits cannot be discarded as
+formatting. Pure rename validation uses an immutable copy of the freshly
+exported pre-write source. Temporary External Sources must be deleted and the
+complete ExternalSource collection must remain stable before saving. Only
+plan-explained formatting, assigned-number, rename, sidecar, and manifest
+transitions may be reconciled. `apply-clone` then compiles
 the broadest supported project/software target and refuses to save on any
 compiler error. Fresh pre-save and post-save inventories must remain clean and
 stable; the durable clone baseline is published only from the post-save snapshot.
@@ -263,10 +269,19 @@ the marker and rechecks current-source hashes before changing `_root`. Bundle
 schema 4 also binds the normalized TIA project path, project version, stable
 project object identifier when available, the selected `SoftwarePath` set, and
 a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
-`check-clone` builds its diff and inventory from one immutable local snapshot,
-cross-checks every clone-source hash, and verifies the live workspace again
-immediately before publishing the marker. All clone commands serialize through
-an exclusive `.opennessllm-workspace.lock` file inside the workspace.
+`check-clone` holds `TiaPortal.ExclusiveAccess` while collecting the complete
+live inventory, exporting sources, and publishing its marker, and requires a
+saved clean project before and after export. It builds its diff and inventory
+from one immutable local snapshot, cross-checks every clone-source hash, and
+verifies the live workspace again immediately before publishing the marker.
+The old marker is invalidated before authoritative collection starts; any
+failure leaves no stale authorization bundle. Temporary local snapshots are
+lease-owned and deleted on both success and failure. All clone commands
+serialize through an exclusive `.opennessllm-workspace.lock` file inside the
+workspace; this control file is ignored by `init-workspace --force` backup
+classification and is never moved as generated content.
+`init-workspace` and the bundle-producing PLC portion of `status` / `check-all`
+use the same authoritative lease and clean-project rules.
 `apply-clone` validates all of these against the open project before constructing
 a plan or invoking any TIA write method. Any pre-schema-4 bundle must be
 refreshed by running `check-clone` again.
@@ -297,6 +312,8 @@ check run, selected PLC, target identity, source hash, language, and resulting
 live object; promotion additionally requires an exportable live source with the
 same canonical content (formatting-only differences are allowed). A
 pre-existing same-identity block is not adopted.
+Whitespace-only formatting may differ, but comments are significant canonical
+content and must match.
 The recoverable `_manifest-publish` transaction rewrites the sidecar origin to
 `tracked-baseline` and publishes the manifest as one transition. Recovery
 validates the complete journal, staged manifest, sources, identities, and every
