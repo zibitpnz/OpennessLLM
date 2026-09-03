@@ -404,26 +404,30 @@ write workflow. Он получает export/source blocker status.
 Под капотом:
 
 ```text
-1. Берёт workspace lock, аннулирует старый marker и получает `TiaPortal.ExclusiveAccess`.
-2. Требует `Project.IsModified=false`, собирает live inventory и экспортирует live
+1. До API resolution/attach берёт workspace lock, пишет durable
+   `clone-check-attempt.json` и аннулирует старый marker.
+2. Получает `TiaPortal.ExclusiveAccess`.
+3. Требует `Project.IsModified=false`, собирает live inventory и экспортирует live
    source для блоков, где это возможно, не отпуская exclusive lease.
-3. Считает live source SHA-256.
-4. Читает clone metadata baseline.
-5. Читает текущие files в CLONE_PROJECT\_root.
-6. Сравнивает baseline, live TIA и clone files.
-7. Пишет block/group/source-blocker/workspace-inventory/summary reports во временный staging.
-8. Atomic replace публикует отчёты, затем последним записывает
+4. Считает live source SHA-256.
+5. Читает clone metadata baseline.
+6. Читает текущие files в CLONE_PROJECT\_root.
+7. Сравнивает baseline, live TIA и clone files.
+8. Пишет block/group/source-blocker/workspace-inventory/summary reports во временный staging.
+9. Atomic replace публикует отчёты, затем marker в состоянии `reports-prepared`
    `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
    compare directory, normalized project identity, выбранным `SoftwarePath` и
    хешами всех source/sidecar/manifest/metadata файлов.
-9. Повторно требует clean project и стабильный полный inventory; только затем
-   `apply-clone` / `sync-clone` могут принять bundle.
+10. Повторно требует clean project и стабильный полный inventory.
+11. Переводит marker в `authoritative-complete` и удаляет attempt sentinel;
+    только затем `apply-clone` / `sync-clone` могут принять bundle.
 ```
 
-Старый marker аннулируется до попытки получить authoritative evidence. Ошибка
-attach, `ExclusiveAccess`, scope, inventory или source export поэтому не может
-оставить старый bundle пригодным для последующей записи. Immutable snapshot в
-`%TEMP%` принадлежит lease и удаляется как при успехе, так и при исключении.
+Attempt sentinel создаётся до API resolution/attach. Ошибка attach,
+`ExclusiveAccess`, scope, inventory, source export или crash до final commit
+поэтому не может оставить старый либо provisional bundle пригодным для записи.
+Immutable snapshot в `%TEMP%` принадлежит lease и удаляется строго; failed cleanup
+завершает команду ошибкой и по возможности карантинируется с audit-файлом.
 
 Типовые статусы:
 
@@ -519,17 +523,22 @@ Pipeline:
 5. Классифицировать операции: update/create/delete/rename/noop/blocker.
 6. Запустить preflight checks.
 7. Записать preflight reports.
-8. Если dry-run, остановиться до TIA writes.
-9. Если --apply, выполнить before-write gates.
-10. Создать backup, если требуется.
-11. Проверить live source drift для изменяемых blocks.
-12. Применить операции через TIA SDK / External Sources.
-13. Проверить результат в изолированной копии workspace: post-check, staged
+8. Под одним `TiaPortal.ExclusiveAccess` проверить dirty-state, полный live
+   pre-state, complete-report safety и immutable source staging также для dry-run.
+9. Если dry-run, остановиться до TIA writes.
+10. Если --apply, выполнить before-write gates.
+11. После gates создать backup внутри ExclusiveAccess; при unsafe dirty override
+    зафиксировать, что filesystem backup не содержит unsaved in-memory state.
+    Вложенный активный clone `--out` исключить из project backup, не отпуская
+    workspace lock; неполную резервную копию удалить и не принимать как backup.
+12. Проверить live source drift для изменяемых blocks.
+13. Применить операции через TIA SDK / External Sources.
+14. Проверить результат в изолированной копии workspace: post-check, staged
     sync, затем второй полностью чистый post-check.
-14. Перестроить source paths/manifests/metadata только в staging.
-15. Сохранить TIA проект (real apply без --save запрещён).
-16. Транзакционно опубликовать `_root`, manifests и metadata с rollback backup.
-17. Только после save/publish выпустить свежий authorization bundle.
+15. Перестроить source paths/manifests/metadata только в staging.
+16. Сохранить TIA проект (real apply без --save запрещён).
+17. Транзакционно опубликовать `_root`, manifests и metadata с rollback backup.
+18. Только после save/publish выпустить свежий authorization bundle.
 ```
 
 Ключевые отчеты:

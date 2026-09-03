@@ -649,6 +649,7 @@ CLONE_PROJECT\clone-check-source-blockers.csv
 CLONE_PROJECT\clone-check-workspace.csv
 CLONE_PROJECT\clone-check-summary.txt
 CLONE_PROJECT\clone-check-bundle.json
+CLONE_PROJECT\clone-check-attempt.json (только пока authoritative refresh не завершён)
 CLONE_PROJECT\_metadata\clone-manifest.json
 CLONE_PROJECT\_metadata\blocks.jsonl
 CLONE_PROJECT\_metadata\groups.jsonl
@@ -684,6 +685,10 @@ unsupported
 workspace сверяется непосредственно перед marker publication. Bundle от другого
 проекта или старой schema отклоняется до apply plan. Clone-команды держат
 эксклюзивный `.opennessllm-workspace.lock` внутри workspace.
+Перед API resolution/attach создаётся `clone-check-attempt.json`; пока он
+существует, старый или provisional bundle не разрешает `sync-clone`/`apply-clone`.
+После финальной проверки принимается только state `authoritative-complete`.
+Junction/symlink/reparse point внутри workspace отклоняется fail closed.
 `check-clone` теперь является авторитетной snapshot-операцией: он требует
 `Project.IsModified=false` и держит `TiaPortal.ExclusiveAccess` от сбора полного
 live inventory до экспорта всех source и публикации marker. Старый marker
@@ -718,6 +723,10 @@ Dry-run:
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
+Это authoritative rehearsal: он держит `TiaPortal.ExclusiveAccess`, требует
+допустимый dirty-state, перепроверяет полный live pre-state и complete report,
+а также создаёт и проверяет immutable staging. TIA write methods не вызываются.
+
 Реальное применение:
 
 ```cmd
@@ -729,6 +738,13 @@ Dry-run:
 другие dirty rows: частичный apply не может пройти глобальную post-check.
 
 Real apply держит `TiaPortal.ExclusiveAccess` от preflight до post-save snapshot.
+Project backup создаётся внутри этого lease после успешных pre-write gates и до
+первой мутации. При unsafe dirty override filesystem backup не включает уже
+существующие unsaved in-memory изменения; это явно фиксируется в audit.
+Если текущий `--out` находится внутри каталога TIA-проекта, активный clone
+workspace исключается из project backup: его workspace lock остаётся удержанным,
+а clone-артефакты не являются файлами TIA-проекта. Неполный backup удаляется и
+не выдаётся за успешно созданный.
 По умолчанию он требует `Project.IsModified=false`; иначе выдаётся
 `PROJECT_DIRTY_BEFORE_APPLY`. Опасное исключение
 `--i-accept-saving-preexisting-project-changes` явно разрешает сохранить уже

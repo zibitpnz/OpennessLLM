@@ -233,24 +233,36 @@ S7 read ranges used. `plc-runtime-write` is a dry-run unless both `--apply` and
 `--i-know-this-writes-plc` are present. It refuses read-only map rows and rejects
 unsafe output masks above 24 bits for the supported output modules.
 
-`apply-clone` always runs a strict preflight first, including dry-runs. It writes
+`apply-clone` always runs an authoritative preflight first, including dry-runs.
+Both modes hold `TiaPortal.ExclusiveAccess`, require an accepted project dirty
+state, revalidate the complete live block/group/source state, apply the complete
+report gate, and hash-verify immutable source staging. A dry-run stops only after
+those proofs and never invokes a TIA write method. It writes
 `apply-clone-preflight-summary.txt`, `apply-clone-preflight-plan.csv`,
 `apply-clone-preflight-issues.csv`, and JSONL projections under
 `_apply-reports` (kept outside the hash-bound baseline `_metadata`).
 If any preflight issue has severity `error`, `--apply` stops before the first
-TIA write. On real `--apply`, the preflight revalidates the complete current
-PLC block/group set and metadata, and re-exports every exportable live source,
+TIA write. The preflight revalidates the complete current PLC block/group set
+and metadata, and re-exports every exportable live source,
 including blocks outside the apply plan. Every source hash must still match the
 latest `check-clone`; a saved or unsaved unplanned TIA edit therefore blocks the
 apply before mutation. TIA object identifiers are also required to remain
 continuous whenever the SDK provides them; unavailable identifiers are
 explicitly reported as unproven rather than silently treated as proof.
+For a real apply, the filesystem project backup is created under the same
+`ExclusiveAccess` lease after all pre-write gates pass. If the clone workspace
+is inside the project directory, that active `--out` directory is excluded from
+the project backup; its separately versioned/audited clone artifacts are not
+TIA project data, and its held workspace lock must remain active through apply.
+An incomplete backup directory is removed and never reported as a valid backup.
 
 After writing, each action must satisfy its exact block identity, available
 object-ID continuity, and token-stream source postcondition, and the complete
 block/group sets must contain no collateral change. Source comments are part of
 the accepted content contract, so comment-only edits cannot be discarded as
-formatting. Pure rename validation uses an immutable copy of the freshly
+formatting. Pure rename classification and validation normalize only the
+top-level declaration-name token; all attributes, interfaces, body tokens, and
+comments must remain equivalent. Validation uses an immutable copy of the freshly
 exported pre-write source. Temporary External Sources must be deleted and the
 complete ExternalSource collection must remain stable before saving. Only
 plan-explained formatting, assigned-number, rename, sidecar, and manifest
@@ -262,7 +274,12 @@ stable; the durable clone baseline is published only from the post-save snapshot
 `check-clone` publishes `clone-check-blocks.csv`,
 `clone-check-groups.csv`, `clone-check-source-blockers.csv`,
 `clone-check-workspace.csv`, and the summary as
-one evidence bundle committed by `clone-check-bundle.json`. `apply-clone` and
+one evidence bundle committed by `clone-check-bundle.json`. Before API
+resolution or TIA attach, a durable `clone-check-attempt.json` revokes any old
+authorization. Reports first have state `reports-prepared`; only after the outer
+clean-project and fresh-inventory checks does the marker transition to
+`authoritative-complete`, after which the attempt sentinel is removed.
+`apply-clone` and
 `sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
 or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
 the marker and rechecks current-source hashes before changing `_root`. Bundle
@@ -274,9 +291,12 @@ live inventory, exporting sources, and publishing its marker, and requires a
 saved clean project before and after export. It builds its diff and inventory
 from one immutable local snapshot, cross-checks every clone-source hash, and
 verifies the live workspace again immediately before publishing the marker.
-The old marker is invalidated before authoritative collection starts; any
-failure leaves no stale authorization bundle. Temporary local snapshots are
-lease-owned and deleted on both success and failure. All clone commands
+The old marker is invalidated before authoritative collection starts; attach,
+open, crash, and final-validation failures leave the durable attempt sentinel,
+so no stale or provisional bundle is accepted. Temporary local snapshots are
+lease-owned and deleted strictly; a failed deletion fails the command and moves
+the owned directory to an audited quarantine when possible. Clone workspace
+paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
 serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
 classification and is never moved as generated content.

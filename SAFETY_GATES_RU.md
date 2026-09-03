@@ -189,6 +189,12 @@ compile commands позволяют --no-backup, но это осознанны�
 Backup не заменяет preflight. Backup нужен как rollback safety, а preflight -
 чтобы не делать плохую запись вообще.
 
+Для `apply-clone` backup создаётся после всех pre-write gates под удерживаемым
+`TiaPortal.ExclusiveAccess`. Если активный `--out` вложен в каталог проекта, он
+исключается из project backup: clone workspace защищён собственным backup/audit
+механизмом и его `.opennessllm-workspace.lock` нельзя отпускать перед мутацией.
+Неполная резервная копия после ошибки удаляется и не считается созданной.
+
 ## 5. Save gate
 
 Для большинства команд `--apply` и `--save` разделены. Исключение —
@@ -327,21 +333,27 @@ Loose-файл в `_root` без точного sidecar
 колонки — fail closed), берёт максимум — неполный/устаревший основной отчёт не
 спрячет блокер.
 
-`check-clone` публикует отчёты как единый atomic evidence bundle. Marker
-`clone-check-bundle.json` записывается последним и содержит общий schema/run ID,
+`check-clone` публикует отчёты как единый atomic evidence bundle. До поиска API
+и attach записывается durable `clone-check-attempt.json`, который отзывает старую
+авторизацию. Marker `clone-check-bundle.json` сначала публикуется со state
+`reports-prepared` и содержит общий schema/run ID,
 row counts, SHA-256, точный `_compare` directory, нормализованный путь проекта,
 версию проекта, стабильный project object ID при его доступности и выбранный
 набор `SoftwarePath`. `apply-clone` сверяет target identity с открытым проектом
 и полный workspace inventory до построения плана и любой TIA-записи. Diff и
 inventory строятся из одного immutable snapshot локальных файлов, clone source
 hash сверяются с ним, а live workspace повторно проверяется непосредственно до
-публикации marker. `.opennessllm-workspace.lock` внутри clone исключает обход
+перехода marker в `authoritative-complete`; только после этого attempt marker
+удаляется. Незавершённый attempt блокирует `apply-clone` и `sync-clone`, в том
+числе после crash или неудачного attach/open. `.opennessllm-workspace.lock` внутри clone исключает обход
 межпроцессной блокировки регистром пути или обычным alias и считается доверенным
 control file при `init-workspace --force`, поэтому не попадает в backup move.
 `check-clone` держит `TiaPortal.ExclusiveAccess` на всём authoritative interval,
 требует clean project до/после экспорта и аннулирует старый marker до начала
 сбора: любая ошибка оставляет write authorization отсутствующим. TEMP snapshot
-удаляется lease-ом на всех путях выхода. Старые
+удаляется строгим owned lease-ом на всех путях выхода; ошибка cleanup завершает
+команду ошибкой и по возможности оставляет audited quarantine. Clone workspace
+и рекурсивные копии fail closed на junction/symlink/reparse point. Старые
 bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 

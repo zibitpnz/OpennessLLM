@@ -342,6 +342,9 @@ source text и перенести соседний `.meta.json` вместе с 
 `10_OldName.scl` -> `10_NewName.scl`. `check-clone` принимает такой rename
 только при единственном совпадении PLC/group/type/number; неоднозначность
 остаётся fail closed.
+Если изменилось только имя верхнеуровневой декларации, план классифицируется как
+`RenameBlock`; любые отличия attributes/interface/body/comments требуют
+`RenameAndUpdateSource`.
 
 После rename заново выпустить bundle:
 
