@@ -4,6 +4,34 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.5 closes the review-a3 apply/correlation gaps. Apply staging now
+  fixes raw and canonical execution digests in each plan item, holds every staged
+  file with `FileAccess.Read` / `FileShare.Read`, and revalidates the workspace
+  plus all staged digests after project backup immediately before the first TIA
+  write. Postconditions compare against the fixed digest, so changing both the
+  staged source and the post-write export cannot redefine the expected result.
+- Strong path/logical no-ID matches are reconsidered when an unmatched moved
+  block has canonically source-equivalent content. Unsupported visual blocks no
+  longer downgrade a correlation ambiguity to an informational warning;
+  ambiguity keeps candidate evidence and is reported as `Severity=error`.
+  Baseline usable-ID/current-unavailable transitions now block as
+  `object-id-continuity-unproven`, and `explicit-new-local-source` is excluded
+  from the weak rename/renumber graph.
+- Existing-block update/rename operations require `tracked-baseline` provenance;
+  `unknown-orphaned` sources fail preflight with
+  `UNKNOWN_ORPHANED_SOURCE_FORBIDDEN`. Owned real-apply staging cleanup is now
+  audited and quarantined on failure; an already committed operation stays
+  accepted and explicitly requires no project recovery.
+- Review-a3 regression coverage passes `86/86` offline self-tests, including
+  staged-source tampering before create/during backup/after write, visual and
+  strong-match ambiguity, durable-ID downgrade, orphan provenance, explicit-new
+  graph exclusion, and committed cleanup failure.
+- The review-a3 build completed a live TIA Portal V21 forward-and-reverse
+  comment-only lifecycle. Both authoritative dry-runs and both real applies
+  passed post-backup workspace/staged-digest revalidation, exact postconditions,
+  compile (`0` errors, `0` warnings), save, fresh post-save checks, and audited
+  staging removal. The final clone check is clean and the pre-existing count of
+  legacy authoritative-prestate directories remained unchanged.
 - Clone baseline correlation now reserves equal usable `TiaObjectId` pairs
   before path/logical/number fallback. Different usable IDs produce the blocking
   `object-replaced-or-mismatched` status, while rename plus renumber without a

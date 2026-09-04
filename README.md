@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.4`. Created by `Zibitpnz`.
+Current version: `0.12.5`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -256,7 +256,13 @@ renumber with unavailable IDs is blocking `ambiguous-rename-and-renumber`.
 Remaining no-ID number and rename/renumber candidates are evaluated as one
 global graph: a non-bijective component is blocking
 `ambiguous-object-correlation`, so old-number reuse cannot authorize a rename or
-delete plan.
+delete plan. A strong path/logical no-ID match is also returned to that graph if
+an unmatched current block has source-equivalent content after normalizing only
+the top-level declaration name. Correlation ambiguity remains blocking even when
+the current visual block cannot be exported, and the candidate list is retained
+in the evidence. If the baseline has a usable TIA object ID but the current run
+cannot prove it, `object-id-continuity-unproven` blocks apply and sync instead of
+erasing the durable identifier.
 The complete pre-state export must actually create every requested source file,
 must leave `Project.IsModified=false` unless the explicit unsafe override is in
 effect. Required live bytes are first copied into immutable staging, then the
@@ -268,6 +274,13 @@ is inside the project directory, that active `--out` directory is excluded from
 the project backup; its separately versioned/audited clone artifacts are not
 TIA project data, and its held workspace lock must remain active through apply.
 An incomplete backup directory is removed and never reported as a valid backup.
+After backup and immediately before the first TIA mutation, the active workspace
+inventory and every staged raw/canonical digest are checked again. Staged sources
+remain open with read-only sharing while TIA can consume them, and postconditions
+compare the exported result with the digests fixed in the plan rather than
+re-reading a mutable expected file. Owned apply staging is removed after the
+transaction; a committed cleanup failure is a non-recovery warning with an
+audited quarantine path and an explicit local confidentiality-cleanup action.
 
 After writing, each action must satisfy its exact block identity, available
 object-ID continuity, and token-stream source postcondition, and the complete
@@ -338,6 +351,10 @@ and `sourceOrigin`. The sidecar wins over the filename numeric prefix and must
 contain nonempty `softwarePath` plus
 `"sourceOrigin":"explicit-new-local-source"`. A filename numeric prefix alone
 does not authorize creation.
+Loose `unknown-orphaned` sources are never authorized to update or rename an
+existing TIA block. `UpdateSource`, `RenameBlock`, and
+`RenameAndUpdateSource` require `tracked-baseline`; intentional adoption or
+recovery must go through `sync-clone` or a separate explicit workflow.
 
 A source discovered outside `plc-blocks.csv` has fail-closed
 `unknown-orphaned` provenance. To assert that it is intentionally new local

@@ -17,20 +17,21 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.4.0")]
-[assembly: AssemblyFileVersion("0.12.4.0")]
+[assembly: AssemblyVersion("0.12.5.0")]
+[assembly: AssemblyFileVersion("0.12.5.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.4";
+        private const string ProductVersion = "0.12.5";
         private const string ProductVersionDate = "2026-09-04";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "5";
-        private const string CloneMatcherRevision = "global-object-correlation-v3";
-        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v5";
+        private const string CloneMatcherRevision = "global-object-correlation-v4";
+        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v6";
+        private const string ApplyStagingOwnerMarkerFileName = ".opennessllm-apply-staging-owner";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
         private const string CloneCheckAttemptFileName = "clone-check-attempt.json";
         private const string CloneCheckBlockFileName = "clone-check-blocks.csv";
@@ -6532,6 +6533,7 @@ namespace OpennessLLM
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "moved-or-renamed"), "PLC blocks moved or renamed");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "moved-or-renamed-and-changed"), "PLC blocks moved/renamed and changed");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "object-replaced-or-mismatched"), "PLC object replacements or identity mismatches");
+            AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "object-id-continuity-unproven"), "PLC durable object-ID continuity gaps");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "ambiguous-rename-and-renumber"), "PLC ambiguous rename and renumber transitions");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "ambiguous-object-correlation"), "PLC ambiguous engineering-object correlations");
             AddWorkspaceBlockerIf(blockers, StatusCount(blockRows, "Status", "export-error"), "PLC export errors");
@@ -6864,6 +6866,7 @@ namespace OpennessLLM
             int moved = StatusCount(blockRows, "Status", "moved-or-renamed");
             int movedChanged = StatusCount(blockRows, "Status", "moved-or-renamed-and-changed");
             int objectMismatches = StatusCount(blockRows, "Status", "object-replaced-or-mismatched");
+            int objectIdContinuityUnproven = StatusCount(blockRows, "Status", "object-id-continuity-unproven");
             int ambiguousRenameRenumber = StatusCount(blockRows, "Status", "ambiguous-rename-and-renumber");
             int ambiguousObjectCorrelation = StatusCount(blockRows, "Status", "ambiguous-object-correlation");
             int exportErrors = StatusCount(blockRows, "Status", "export-error");
@@ -6871,7 +6874,7 @@ namespace OpennessLLM
             int informationalSourceBlockers = InformationalSourceBlockerCount(blockRows);
             int groupAdded = StatusCount(groupRows, "Status", "added");
             int groupRemoved = StatusCount(groupRows, "Status", "removed");
-            int dirtyRows = changed + added + removed + moved + movedChanged + objectMismatches + ambiguousRenameRenumber + ambiguousObjectCorrelation + exportErrors + sourceBlockers + groupAdded + groupRemoved;
+            int dirtyRows = changed + added + removed + moved + movedChanged + objectMismatches + objectIdContinuityUnproven + ambiguousRenameRenumber + ambiguousObjectCorrelation + exportErrors + sourceBlockers + groupAdded + groupRemoved;
 
             AddToolStatusCount(layer, "dirtyRows", dirtyRows);
             AddToolStatusCount(layer, "sourceBlockers", sourceBlockers);
@@ -6882,6 +6885,7 @@ namespace OpennessLLM
             AddToolStatusBlockerIf(layer, moved, "PLC blocks moved or renamed");
             AddToolStatusBlockerIf(layer, movedChanged, "PLC blocks moved/renamed and changed");
             AddToolStatusBlockerIf(layer, objectMismatches, "PLC object replacements or identity mismatches");
+            AddToolStatusBlockerIf(layer, objectIdContinuityUnproven, "PLC durable object-ID continuity gaps");
             AddToolStatusBlockerIf(layer, ambiguousRenameRenumber, "PLC ambiguous rename and renumber transitions");
             AddToolStatusBlockerIf(layer, ambiguousObjectCorrelation, "PLC ambiguous engineering-object correlations");
             AddToolStatusBlockerIf(layer, exportErrors, "PLC source export errors");
@@ -13996,7 +14000,7 @@ namespace OpennessLLM
                 stagedGroupReportPath,
                 groupDiffs.Count,
                 stagedSourceBlockerReportPath,
-                blockDiffs.Count(IsSourceBlockedDiff),
+                blockDiffs.Count(IsSourceEvidenceBlockerDiff),
                 stagedWorkspaceReportPath,
                 workspaceFiles.Count,
                 stagedSummaryPath,
@@ -14045,10 +14049,11 @@ namespace OpennessLLM
             PrintDiffCount("Block moved/renamed", blockDiffs, "moved-or-renamed");
             PrintDiffCount("Block moved/renamed and changed", blockDiffs, "moved-or-renamed-and-changed");
             PrintDiffCount("Block object replacements/mismatches", blockDiffs, "object-replaced-or-mismatched");
+            PrintDiffCount("Block object-ID continuity unproven", blockDiffs, "object-id-continuity-unproven");
             PrintDiffCount("Block ambiguous rename+renumber", blockDiffs, "ambiguous-rename-and-renumber");
             PrintDiffCount("Block ambiguous object correlations", blockDiffs, "ambiguous-object-correlation");
             PrintDiffCount("Block export errors", blockDiffs, "export-error");
-            Console.WriteLine("Source blockers (blocking / total): " + BlockingSourceBlockedDiffCount(blockDiffs) + " / " + blockDiffs.Count(IsSourceBlockedDiff));
+            Console.WriteLine("Source blockers (blocking / total): " + BlockingSourceBlockedDiffCount(blockDiffs) + " / " + blockDiffs.Count(IsSourceEvidenceBlockerDiff));
             PrintGroupDiffCount("Group unchanged", groupDiffs, "unchanged");
             PrintGroupDiffCount("Group added", groupDiffs, "added");
             PrintGroupDiffCount("Group removed", groupDiffs, "removed");
@@ -14151,12 +14156,7 @@ namespace OpennessLLM
                     ambiguousFallbackMessages.TryGetValue(current, out ambiguousMessage);
                     if (!EqualsIgnoreCase(current.ExportStatus, "ok"))
                     {
-                        diffs.Add(CloneDiff(
-                            SourceBlockedStatus(current, ambiguousClone),
-                            current,
-                            ambiguousClone,
-                            SourceBlockedMessage(current, ambiguousClone) + " " + ambiguousMessage));
-                        continue;
+                        ambiguousMessage += " Source export is also unavailable: " + SourceBlockedMessage(current, ambiguousClone);
                     }
                     diffs.Add(CloneDiff(
                         ambiguousStatus,
@@ -14204,6 +14204,17 @@ namespace OpennessLLM
             CloneBlockRecord clone,
             string matchMessage)
         {
+            if (HasUsableTiaObjectId(clone) && !HasUsableTiaObjectId(current))
+            {
+                diffs.Add(CloneDiff(
+                    "object-id-continuity-unproven",
+                    current,
+                    clone,
+                    "OBJECT_ID_CONTINUITY_UNPROVEN: the tracked baseline has durable TIA object identifier '"
+                        + clone.TiaObjectId + "', but the current snapshot does not expose a usable identifier. Refusing to downgrade or erase durable identity evidence."));
+                return;
+            }
+
             if (HasUsableTiaObjectId(current)
                 && HasUsableTiaObjectId(clone)
                 && !EqualsIgnoreCase(current.TiaObjectId, clone.TiaObjectId))
@@ -14404,6 +14415,29 @@ namespace OpennessLLM
                 }
             }
 
+            // A same-path/same-logical replacement must not consume the baseline
+            // before an unmatched, source-equivalent block that moved by both
+            // name and number can enter the global correlation graph.
+            List<CloneBlockRecord> provisionallyUnmatchedCurrent = unmatched
+                .Where(current => !matches.ContainsKey(current))
+                .ToList();
+            foreach (KeyValuePair<CloneBlockRecord, CloneBlockRecord> pair in matches.ToList())
+            {
+                if (HasUsableTiaObjectId(pair.Key) || HasUsableTiaObjectId(pair.Value))
+                {
+                    continue;
+                }
+                if (!provisionallyUnmatchedCurrent.Any(candidate =>
+                    IsPlausibleMovedSourceEquivalentCandidate(candidate, pair.Value)))
+                {
+                    continue;
+                }
+
+                matches.Remove(pair.Key);
+                matchMessages.Remove(pair.Key);
+                usedCloneBlocks.Remove(pair.Value);
+            }
+
             // Number-only matches and no-ID rename+renumber possibilities are
             // evaluated as one global graph. A greedy number match is unsafe:
             // an unrelated block may reuse the old number while the tracked
@@ -14464,7 +14498,11 @@ namespace OpennessLLM
                 else
                 {
                     ambiguousStatuses[current] = "ambiguous-object-correlation";
-                    ambiguousMessages[current] = "AMBIGUOUS_OBJECT_CORRELATION: the global no-ID fallback graph is not mutually one-to-one. An old number may have been reused while the tracked object was renamed or renumbered. No automatic destructive pair is authorized.";
+                    ambiguousMessages[current] = "AMBIGUOUS_OBJECT_CORRELATION: the global no-ID fallback graph is not mutually one-to-one. An old number may have been reused while the tracked object was renamed or renumbered. Candidate baseline objects: "
+                        + string.Join(", ", candidates
+                            .Select(candidate => EmptyIfNull(candidate.Name) + " " + EmptyIfNull(candidate.NumberSpace) + EmptyIfNull(candidate.Number))
+                            .ToArray())
+                        + ". No automatic destructive pair is authorized.";
                 }
             }
 
@@ -14474,6 +14512,7 @@ namespace OpennessLLM
         private static bool IsCloneWeakFallbackCandidate(CloneBlockRecord current, CloneBlockRecord clone)
         {
             if (current == null || clone == null
+                || EqualsIgnoreCase(clone.Provenance, "explicit-new-local-source")
                 || string.IsNullOrWhiteSpace(current.SoftwarePath)
                 || string.IsNullOrWhiteSpace(clone.SoftwarePath)
                 || !EqualsIgnoreCase(current.SoftwarePath, clone.SoftwarePath)
@@ -14497,6 +14536,24 @@ namespace OpennessLLM
                 && !EqualsIgnoreCase(clone.Name, current.Name)
                 && !EqualsIgnoreCase(clone.Number, current.Number)
                 && (!HasUsableTiaObjectId(clone) || !HasUsableTiaObjectId(current));
+        }
+
+        private static bool IsPlausibleMovedSourceEquivalentCandidate(
+            CloneBlockRecord current,
+            CloneBlockRecord clone)
+        {
+            return current != null
+                && clone != null
+                && !EqualsIgnoreCase(clone.Provenance, "explicit-new-local-source")
+                && !HasUsableTiaObjectId(current)
+                && !HasUsableTiaObjectId(clone)
+                && EqualsIgnoreCase(current.SoftwarePath, clone.SoftwarePath)
+                && EqualsIgnoreCase(
+                    BlockNumberSpace(current.TypeName, current.ProgrammingLanguage),
+                    BlockNumberSpace(clone.TypeName, clone.ProgrammingLanguage))
+                && !EqualsIgnoreCase(current.Name, clone.Name)
+                && !EqualsIgnoreCase(current.Number, clone.Number)
+                && CloneSourceContentEquivalentForDiff(current, clone);
         }
 
         private static Dictionary<string, CloneBlockRecord> UniqueByUsableTiaObjectId(
@@ -14719,6 +14776,7 @@ namespace OpennessLLM
                 CurrentNormalizedSourceSha256 = current == null ? string.Empty : current.NormalizedSourceSha256,
                 CurrentRelativePath = current == null ? string.Empty : current.RelativePath,
                 CurrentPath = current == null ? string.Empty : current.CurrentPath,
+                CurrentExportStatus = current == null ? string.Empty : current.ExportStatus,
                 Message = message
             };
         }
@@ -14807,7 +14865,7 @@ namespace OpennessLLM
                 writer.WriteLine("PLC blocks in clone manifest: " + cloneBlocks.Count);
                 writer.WriteLine("PLC blocks in current TIA project: " + currentBlocks.Count);
                 WriteStatusCounts(writer, "Block", blockDiffs.Select(x => x.Status));
-                writer.WriteLine("Source blockers (blocking / total): " + BlockingSourceBlockedDiffCount(blockDiffs) + " / " + blockDiffs.Count(IsSourceBlockedDiff));
+                writer.WriteLine("Source blockers (blocking / total): " + BlockingSourceBlockedDiffCount(blockDiffs) + " / " + blockDiffs.Count(IsSourceEvidenceBlockerDiff));
                 writer.WriteLine();
                 WriteStatusCounts(writer, "Group", groupDiffs.Select(x => x.Status));
             }
@@ -15800,7 +15858,7 @@ namespace OpennessLLM
             WriteCsv(path,
                 new[] { "CheckSchemaVersion", "CheckRunId", "SoftwarePath", "Severity", "Code", "Status", "GroupPath", "Name", "NumberSpace", "Number", "CloneLanguage", "CurrentLanguage", "ClonePath", "CurrentPath", "Action", "Message" },
                 blockDiffs
-                    .Where(IsSourceBlockedDiff)
+                    .Where(IsSourceEvidenceBlockerDiff)
                     .OrderBy(x => x.GroupPath)
                     .ThenBy(x => SafeInt(x.Number))
                     .ThenBy(x => x.Name)
@@ -15809,14 +15867,15 @@ namespace OpennessLLM
                         schemaVersion,
                         checkRunId,
                         FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
-                        SourceBlockedStatusBlocksWrite(
-                            x.Status,
-                            new BlockKey(
-                                FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
-                                FirstNonEmpty(x.CurrentNumberSpace, x.NumberSpace),
-                                FirstNonEmpty(x.CurrentNumber, x.Number),
-                                FirstNonEmpty(x.CurrentName, x.Name)),
-                            removedCloneKeys) ? "error" : "warning",
+                        IsCloneCorrelationAmbiguityStatus(x.Status)
+                            || SourceBlockedStatusBlocksWrite(
+                                x.Status,
+                                new BlockKey(
+                                    FirstNonEmpty(x.CurrentSoftwarePath, x.SoftwarePath),
+                                    FirstNonEmpty(x.CurrentNumberSpace, x.NumberSpace),
+                                    FirstNonEmpty(x.CurrentNumber, x.Number),
+                                    FirstNonEmpty(x.CurrentName, x.Name)),
+                                removedCloneKeys) ? "error" : "warning",
                         SourceBlockerCode(x),
                         x.Status,
                         x.GroupPath,
@@ -15837,6 +15896,20 @@ namespace OpennessLLM
             return diff != null && IsSourceBlockedStatus(diff.Status);
         }
 
+        private static bool IsSourceEvidenceBlockerDiff(CloneDiffRecord diff)
+        {
+            return diff != null
+                && (IsSourceBlockedStatus(diff.Status)
+                    || (IsCloneCorrelationAmbiguityStatus(diff.Status)
+                        && !EqualsIgnoreCase(diff.CurrentExportStatus, "ok")));
+        }
+
+        private static bool IsCloneCorrelationAmbiguityStatus(string status)
+        {
+            return EqualsIgnoreCase(status, "ambiguous-object-correlation")
+                || EqualsIgnoreCase(status, "ambiguous-rename-and-renumber");
+        }
+
         private static int BlockingSourceBlockedDiffCount(List<CloneDiffRecord> blockDiffs)
         {
             if (blockDiffs == null)
@@ -15845,15 +15918,16 @@ namespace OpennessLLM
             }
 
             List<RemovedCloneRef> removed = RemovedCloneRefsFromDiffs(blockDiffs);
-            return blockDiffs.Count(d => IsSourceBlockedDiff(d)
-                && SourceBlockedStatusBlocksWrite(
-                    d.Status,
-                    new BlockKey(
-                        FirstNonEmpty(d.CurrentSoftwarePath, d.SoftwarePath),
-                        FirstNonEmpty(d.CurrentNumberSpace, d.NumberSpace),
-                        FirstNonEmpty(d.CurrentNumber, d.Number),
-                        FirstNonEmpty(d.CurrentName, d.Name)),
-                    removed));
+            return blockDiffs.Count(d => IsSourceEvidenceBlockerDiff(d)
+                && (IsCloneCorrelationAmbiguityStatus(d.Status)
+                    || SourceBlockedStatusBlocksWrite(
+                        d.Status,
+                        new BlockKey(
+                            FirstNonEmpty(d.CurrentSoftwarePath, d.SoftwarePath),
+                            FirstNonEmpty(d.CurrentNumberSpace, d.NumberSpace),
+                            FirstNonEmpty(d.CurrentNumber, d.Number),
+                            FirstNonEmpty(d.CurrentName, d.Name)),
+                        removed)));
         }
 
         private static bool IsSourceBlockedStatus(string status)
@@ -16127,6 +16201,10 @@ namespace OpennessLLM
 
         private static string SourceBlockerCode(CloneDiffRecord diff)
         {
+            if (IsCloneCorrelationAmbiguityStatus(diff.Status))
+            {
+                return "AMBIGUOUS_OBJECT_CORRELATION_WITHOUT_SOURCE";
+            }
             if (EqualsIgnoreCase(diff.Status, "source-blocked-language-converted"))
             {
                 return "UNSUPPORTED_LANGUAGE_CONVERSION";
@@ -16142,6 +16220,10 @@ namespace OpennessLLM
 
         private static string SourceBlockerAction(CloneDiffRecord diff)
         {
+            if (IsCloneCorrelationAmbiguityStatus(diff.Status))
+            {
+                return "Restore durable object-ID/source evidence or resolve the correlation manually in TIA, then run check-clone again. Apply and sync remain blocked.";
+            }
             if (EqualsIgnoreCase(diff.Status, "source-blocked-language-converted"))
             {
                 return "Convert the current TIA block back to STL/SCL, compile it, then run check-clone again. Do not run sync-clone while this blocker exists.";
@@ -16178,7 +16260,7 @@ namespace OpennessLLM
                     .FirstOrDefault();
             }
 
-            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone bundle contains " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a tracked/unknown-orphaned block of overlapping software and known-or-unknown number space went missing while an unmatched visual block is present; or dedicated source-blocker evidence is malformed. Resolve the TIA/clone conflict or regenerate the complete bundle with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
+            throw new InvalidOperationException(commandName + " is blocked because the latest check-clone bundle contains " + blockerCount + " blocking or malformed source-blocker evidence row(s). First blocker: " + FirstNonEmpty(first, "unknown") + ". Cause is one of: a clone-tracked block was converted to LAD/FBD/GRAPH; an unsupported visual block participates in ambiguous object correlation; a clone-tracked block failed source export; a current-only visual block shares a number/name with a removed clone row; a tracked/unknown-orphaned block of overlapping software and known-or-unknown number space went missing while an unmatched visual block is present; or dedicated source-blocker evidence is malformed. Resolve the TIA/clone conflict or regenerate the complete bundle with check-clone. Pre-existing LAD/F_LAD blocks that were never in CLONE_PROJECT and match no pending clone operation are informational only. See CLONE_PROJECT\\clone-check-source-blockers.csv.");
         }
 
         private static void WriteStatusCounts(StreamWriter writer, string label, IEnumerable<string> statuses)
@@ -19151,16 +19233,20 @@ namespace OpennessLLM
             }
 
             string preparedApplyStagingDir = null;
+            ApplyStagingLease preparedApplyStagingLease = null;
             if (plan.Count > 0)
             {
                 try
                 {
                     ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
-                    preparedApplyStagingDir = StageApplyClonePlanSources(outDir, bundle, plan, rootDir);
+                    preparedApplyStagingDir = StageApplyClonePlanSources(outDir, bundle, plan, rootDir, out preparedApplyStagingLease);
+                    WriteApplyClonePreflightReports(outDir, plan, preflight.Issues);
                 }
                 catch (Exception ex)
                 {
-                    TryDeleteApplyStaging(preparedApplyStagingDir);
+                    TryDispose(preparedApplyStagingLease);
+                    preparedApplyStagingLease = null;
+                    CleanupApplyStaging(preparedApplyStagingDir);
                     AddApplyCloneGate(gates, "before-write", "immutable-source-staging", "failed", true, true, false, "Immutable source staging failed before pre-state evidence cleanup or any TIA write: " + ex.Message, outDir, "all planned clone/live sources copied with checked hashes", ex.GetType().Name + ": " + ex.Message);
                     WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
                     throw new InvalidOperationException("apply-clone immutable source staging failed before any TIA write; no TIA mutation started.", ex);
@@ -19174,7 +19260,9 @@ namespace OpennessLLM
             }
             catch (Exception ex)
             {
-                TryDeleteApplyStaging(preparedApplyStagingDir);
+                TryDispose(preparedApplyStagingLease);
+                preparedApplyStagingLease = null;
+                CleanupApplyStaging(preparedApplyStagingDir);
                 preparedApplyStagingDir = null;
                 AddApplyCloneGate(gates, "before-write", "prestate-evidence-cleanup", "failed", true, true, false, "PRESTATE_EVIDENCE_CLEANUP_FAILED: strict cleanup failed before any TIA write; no TIA mutation started. " + ex.Message, outDir, "owned authoritative pre-state export absent before first write", ex.GetType().Name + ": " + ex.Message);
                 WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
@@ -19193,10 +19281,12 @@ namespace OpennessLLM
             if (!options.Apply)
             {
                 string dryRunStagingDir = preparedApplyStagingDir;
-                TryDeleteApplyStaging(dryRunStagingDir);
-                if (!string.IsNullOrWhiteSpace(dryRunStagingDir) && Directory.Exists(dryRunStagingDir))
+                TryDispose(preparedApplyStagingLease);
+                preparedApplyStagingLease = null;
+                ApplyStagingCleanupResult dryRunCleanup = CleanupApplyStaging(dryRunStagingDir);
+                if (!dryRunCleanup.Removed)
                 {
-                    throw new IOException("Authoritative dry-run immutable source staging could not be removed: " + dryRunStagingDir);
+                    throw new IOException("Authoritative dry-run immutable source staging could not be removed cleanly: " + dryRunCleanup.Message);
                 }
                 AddApplyCloneGate(gates, "before-write", "immutable-source-staging", "passed", true, true, false, "Every planned source was copied and hash-verified in immutable staging; staging was removed without invoking a TIA write.", dryRunStagingDir, "all planned sources staged with checked hashes", "plan items=" + plan.Count.ToString(CultureInfo.InvariantCulture));
 
@@ -19225,11 +19315,32 @@ namespace OpennessLLM
             }
             catch (Exception ex)
             {
-                TryDeleteApplyStaging(preparedApplyStagingDir);
+                TryDispose(preparedApplyStagingLease);
+                preparedApplyStagingLease = null;
+                CleanupApplyStaging(preparedApplyStagingDir);
                 preparedApplyStagingDir = null;
                 AddApplyCloneGate(gates, "before-write", "pre-apply-backup", "failed", true, true, false, "Pre-apply project backup failed: " + ex.Message, options.ProjectPath, "backup exists before first TIA mutation", ex.GetType().Name + ": " + ex.Message);
                 WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
                 throw new InvalidOperationException("apply-clone could not create its pre-mutation project backup.", ex);
+            }
+
+            try
+            {
+                // Backup can be long-running. Revalidate both the live workspace
+                // and the fixed staged digests immediately before the first TIA
+                // mutation; staged files remain read-locked for TIA's readers.
+                ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
+                ValidateApplyStagingDigests(plan);
+                AddApplyCloneGate(gates, "before-write", "post-backup-source-revalidation", "passed", true, true, false, "Active clone workspace and fixed staged raw/canonical digests were revalidated after backup and immediately before the first TIA write.", preparedApplyStagingDir, "workspace unchanged; every staged digest equals its fixed plan digest", "passed");
+            }
+            catch (Exception ex)
+            {
+                TryDispose(preparedApplyStagingLease);
+                preparedApplyStagingLease = null;
+                ApplyStagingCleanupResult cleanup = CleanupApplyStaging(preparedApplyStagingDir);
+                AddApplyCloneGate(gates, "before-write", "post-backup-source-revalidation", "failed", true, true, false, "Post-backup source revalidation failed before any TIA write: " + ex.Message, preparedApplyStagingDir, "workspace unchanged; every staged digest equals its fixed plan digest", ex.GetType().Name + ": " + ex.Message + "; cleanup=" + cleanup.Status);
+                WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, false, false, false, false, plan.Count), options.Apply, options.Save, false, false, false, plan, preflight, gates, operations);
+                throw new InvalidOperationException("apply-clone post-backup source revalidation failed before any TIA write; no TIA mutation started.", ex);
             }
 
             if (projectDirtyBeforeApply != false && options.AcceptSavingPreexistingProjectChanges)
@@ -19242,6 +19353,7 @@ namespace OpennessLLM
             Exception writeException = null;
             bool originalSave = options.Save;
             string applyStagingDir = preparedApplyStagingDir;
+            ApplyStagingLease applyStagingLease = preparedApplyStagingLease;
             try
             {
                 options.Save = false;
@@ -19269,8 +19381,11 @@ namespace OpennessLLM
             {
                 AddApplyCloneGate(gates, "write", "apply-operations", "failed", true, false, true, "A TIA write operation failed: " + writeException.Message, Path.Combine(outDir, "apply-clone-operations.csv"), "failed operations=0", "failed operations=1");
                 AddApplyCloneSavePolicyGate(gates, false, writeAttempted, false, originalSave, false, null);
+                TryDispose(applyStagingLease);
+                applyStagingLease = null;
+                ApplyStagingCleanupResult failedWriteCleanup = CleanupApplyStaging(applyStagingDir);
+                AddApplyStagingCleanupGate(gates, failedWriteCleanup, false, false);
                 WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, false, plan.Count), options.Apply, originalSave, false, writeAttempted, true, plan, preflight, gates, operations);
-                TryDeleteApplyStaging(applyStagingDir);
                 throw new InvalidOperationException("apply-clone write failed. The open TIA project may contain partial unsaved changes; close without saving or restore the pre-apply backup.", writeException);
             }
 
@@ -19522,8 +19637,11 @@ namespace OpennessLLM
             TryDeleteApplyValidationWorkspace(validationDir);
             bool fullyAccepted = accepted && savedProject && publishException == null;
             AddApplyCloneSavePolicyGate(gates, accepted && finalizationException == null, writeAttempted, true, originalSave, savedProject, finalizationException ?? saveException ?? publishException);
+            TryDispose(applyStagingLease);
+            applyStagingLease = null;
+            ApplyStagingCleanupResult finalStagingCleanup = CleanupApplyStaging(applyStagingDir);
+            AddApplyStagingCleanupGate(gates, finalStagingCleanup, savedProject, fullyAccepted);
             WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, fullyAccepted, plan.Count), options.Apply, originalSave, savedProject, writeAttempted, true, plan, preflight, gates, operations);
-            TryDeleteApplyStaging(applyStagingDir);
 
             if (finalizationException != null)
             {
@@ -20083,26 +20201,28 @@ namespace OpennessLLM
             string currentPath = GetCsvValue(row, "CurrentPath");
             string currentHash = GetCsvValue(row, "CurrentSourceSha256");
             string currentLanguage = FirstNonEmpty(GetCsvValue(row, "CurrentProgrammingLanguage"), GetCsvValue(row, "ProgrammingLanguage"));
-            string expectedPath = EqualsIgnoreCase(item.Action, "RenameBlock")
-                ? item.ExecutionLiveSourcePath
-                : item.ExecutionSourcePath;
+            bool pureRename = EqualsIgnoreCase(item.Action, "RenameBlock");
+            string expectedCanonical = pureRename
+                ? item.ExecutionLiveSourceCanonicalSha256
+                : item.ExecutionSourceCanonicalSha256;
+            string expectedDeclarationName = pureRename
+                ? item.ExecutionLiveSourceDeclarationName
+                : item.ExecutionSourceDeclarationName;
             if (string.IsNullOrWhiteSpace(currentPath)
                 || string.IsNullOrWhiteSpace(currentHash)
                 || !File.Exists(currentPath)
                 || !EqualsIgnoreCase(ComputeFileSha256(currentPath), currentHash)
-                || string.IsNullOrWhiteSpace(expectedPath)
-                || !File.Exists(expectedPath)
+                || string.IsNullOrWhiteSpace(expectedCanonical)
+                || string.IsNullOrWhiteSpace(expectedDeclarationName)
                 || !EqualsIgnoreCase(currentLanguage, item.ProgrammingLanguage))
             {
                 throw new InvalidDataException(item.Action + " post-write source evidence is missing, stale, or has the wrong language for " + item.TargetName + ".");
             }
 
-            bool pureRename = EqualsIgnoreCase(item.Action, "RenameBlock");
             if (pureRename)
             {
-                string beforeDeclarationName = TryReadBlockNameFromSource(expectedPath);
                 string afterDeclarationName = TryReadBlockNameFromSource(currentPath);
-                if (!EqualsIgnoreCase(beforeDeclarationName, item.CurrentName)
+                if (!EqualsIgnoreCase(expectedDeclarationName, item.CurrentName)
                     || !EqualsIgnoreCase(afterDeclarationName, item.TargetName))
                 {
                     throw new InvalidDataException(
@@ -20111,10 +20231,8 @@ namespace OpennessLLM
                 }
             }
 
-            string expectedCanonical = ComputeCanonicalSourceSha256(expectedPath, pureRename);
             string actualCanonical = ComputeCanonicalSourceSha256(currentPath, pureRename);
-            if (string.IsNullOrWhiteSpace(expectedCanonical)
-                || !EqualsIgnoreCase(expectedCanonical, actualCanonical))
+            if (!EqualsIgnoreCase(expectedCanonical, actualCanonical))
             {
                 throw new InvalidDataException(item.Action + " post-write token stream differs from the authorized source for " + item.TargetName + ".");
             }
@@ -20300,18 +20418,30 @@ namespace OpennessLLM
             string outDir,
             CloneCheckBundleEvidence bundle,
             List<ApplyPlanItem> plan,
-            string rootDir)
+            string rootDir,
+            out ApplyStagingLease lease)
         {
+            lease = null;
             string stagingParent = Path.Combine(outDir, "_apply-staging");
             string stagingDir = Path.Combine(stagingParent, "run-" + bundle.CheckRunId + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            Directory.CreateDirectory(stagingDir);
+            ApplyStagingLease stagedLease = new ApplyStagingLease { DirectoryPath = stagingDir };
             try
             {
+                Directory.CreateDirectory(stagingDir);
+                WriteTextFile(
+                    Path.Combine(stagingDir, ApplyStagingOwnerMarkerFileName),
+                    "OpennessLLM apply staging\ncheckRunId=" + EmptyIfNull(bundle.CheckRunId) + "\n");
                 int index = 0;
                 foreach (ApplyPlanItem item in plan ?? new List<ApplyPlanItem>())
                 {
-                    item.ExecutionSourcePath = item.ClonePath;
+                    item.ExecutionSourcePath = string.Empty;
+                    item.ExecutionSourceSha256 = string.Empty;
+                    item.ExecutionSourceCanonicalSha256 = string.Empty;
+                    item.ExecutionSourceDeclarationName = string.Empty;
                     item.ExecutionLiveSourcePath = string.Empty;
+                    item.ExecutionLiveSourceSha256 = string.Empty;
+                    item.ExecutionLiveSourceCanonicalSha256 = string.Empty;
+                    item.ExecutionLiveSourceDeclarationName = string.Empty;
                     if (!string.IsNullOrWhiteSpace(item.LiveSourcePath))
                     {
                         if (!File.Exists(item.LiveSourcePath)
@@ -20331,7 +20461,7 @@ namespace OpennessLLM
                         {
                             throw new InvalidDataException("Immutable live source staging did not preserve the authoritative bytes: " + item.LiveSourcePath);
                         }
-                        item.ExecutionLiveSourcePath = stagedLiveSource;
+                        CaptureApplyExecutionSourceEvidence(item, stagedLiveSource, true);
                     }
 
                     if (item.WillDelete || string.IsNullOrWhiteSpace(item.ClonePath))
@@ -20357,43 +20487,238 @@ namespace OpennessLLM
                         throw new InvalidDataException("Apply source bytes no longer match the checked bundle: " + item.ClonePath);
                     }
 
-                    item.ExecutionSourcePath = stagedSource;
+                    CaptureApplyExecutionSourceEvidence(item, stagedSource, false);
                     index++;
                 }
 
-                // Detect edits that raced with staging before the first TIA write.
+                foreach (string path in (plan ?? new List<ApplyPlanItem>())
+                    .SelectMany(item => new[] { item.ExecutionLiveSourcePath, item.ExecutionSourcePath })
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    // TIA may open the staged source by path. FileShare.Read allows
+                    // that read while denying writers, deletion, and replacement.
+                    stagedLease.HoldReadLock(path);
+                }
+
+                ValidateApplyStagingDigests(plan);
+                // Detect edits that raced with staging before backup starts.
                 ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
+                lease = stagedLease;
                 return stagingDir;
             }
             catch
             {
-                TryDeleteApplyStaging(stagingDir);
+                stagedLease.Dispose();
+                if (File.Exists(Path.Combine(stagingDir, ApplyStagingOwnerMarkerFileName)))
+                {
+                    CleanupApplyStaging(stagingDir);
+                }
+                else if (Directory.Exists(stagingDir))
+                {
+                    // This exact directory was created by this invocation, but
+                    // marker publication itself failed before ownership became
+                    // externally auditable.
+                    try
+                    {
+                        Directory.Delete(stagingDir, true);
+                    }
+                    catch
+                    {
+                    }
+                }
                 throw;
             }
         }
 
-        private static void TryDeleteApplyStaging(string stagingDir)
+        private static void CaptureApplyExecutionSourceEvidence(ApplyPlanItem item, string path, bool liveSource)
         {
-            if (string.IsNullOrWhiteSpace(stagingDir))
+            string rawSha256 = ComputeFileSha256(path);
+            string canonicalSha256 = ComputeCanonicalSourceSha256(path, liveSource);
+            string declarationName = TryReadBlockNameFromSource(path);
+            if (string.IsNullOrWhiteSpace(rawSha256)
+                || string.IsNullOrWhiteSpace(canonicalSha256)
+                || string.IsNullOrWhiteSpace(declarationName))
+            {
+                throw new InvalidDataException("Staged apply source lacks immutable content evidence: " + path);
+            }
+
+            if (liveSource)
+            {
+                item.ExecutionLiveSourcePath = path;
+                item.ExecutionLiveSourceSha256 = rawSha256;
+                item.ExecutionLiveSourceCanonicalSha256 = canonicalSha256;
+                item.ExecutionLiveSourceDeclarationName = declarationName;
+            }
+            else
+            {
+                item.ExecutionSourcePath = path;
+                item.ExecutionSourceSha256 = rawSha256;
+                item.ExecutionSourceCanonicalSha256 = canonicalSha256;
+                item.ExecutionSourceDeclarationName = declarationName;
+            }
+        }
+
+        private static void ValidateApplyStagingDigests(List<ApplyPlanItem> plan)
+        {
+            foreach (ApplyPlanItem item in plan ?? new List<ApplyPlanItem>())
+            {
+                ValidateApplyStagedFile(
+                    item.ExecutionLiveSourcePath,
+                    item.ExecutionLiveSourceSha256,
+                    item.ExecutionLiveSourceCanonicalSha256,
+                    item.ExecutionLiveSourceDeclarationName,
+                    true,
+                    item.Action + " authoritative live source");
+                ValidateApplyStagedFile(
+                    item.ExecutionSourcePath,
+                    item.ExecutionSourceSha256,
+                    item.ExecutionSourceCanonicalSha256,
+                    item.ExecutionSourceDeclarationName,
+                    false,
+                    item.Action + " clone source");
+            }
+        }
+
+        private static void ValidateApplyStagedFile(
+            string path,
+            string expectedRawSha256,
+            string expectedCanonicalSha256,
+            string expectedDeclarationName,
+            bool normalizeDeclarationName,
+            string label)
+        {
+            if (string.IsNullOrWhiteSpace(path))
             {
                 return;
             }
+            if (!File.Exists(path)
+                || string.IsNullOrWhiteSpace(expectedRawSha256)
+                || string.IsNullOrWhiteSpace(expectedCanonicalSha256)
+                || string.IsNullOrWhiteSpace(expectedDeclarationName)
+                || !EqualsIgnoreCase(ComputeFileSha256(path), expectedRawSha256)
+                || !EqualsIgnoreCase(ComputeCanonicalSourceSha256(path, normalizeDeclarationName), expectedCanonicalSha256)
+                || !EqualsIgnoreCase(TryReadBlockNameFromSource(path), expectedDeclarationName))
+            {
+                throw new InvalidDataException("Immutable staged bytes changed or lost their fixed evidence for " + label + ": " + path);
+            }
+        }
 
+        private static ApplyStagingCleanupResult CleanupApplyStaging(string stagingDir)
+        {
+            return CleanupApplyStaging(stagingDir, path => Directory.Delete(path, true));
+        }
+
+        private static ApplyStagingCleanupResult CleanupApplyStaging(string stagingDir, Action<string> deleteDirectory)
+        {
+            ApplyStagingCleanupResult result = new ApplyStagingCleanupResult
+            {
+                OriginalPath = EmptyIfNull(stagingDir),
+                EvidencePath = EmptyIfNull(stagingDir),
+                Status = "removed",
+                Message = "Apply staging did not exist or was removed."
+            };
+            if (string.IsNullOrWhiteSpace(stagingDir) || !Directory.Exists(stagingDir))
+            {
+                return result;
+            }
+
+            string markerPath = Path.Combine(stagingDir, ApplyStagingOwnerMarkerFileName);
+            if (!File.Exists(markerPath))
+            {
+                result.Status = "failed";
+                result.Message = "Refused to remove apply staging without the OpennessLLM ownership marker.";
+                return result;
+            }
+
+            string stagingParent = Path.GetDirectoryName(stagingDir);
+            string outDir = Path.GetDirectoryName(stagingParent);
             try
             {
-                string parent = Path.GetDirectoryName(stagingDir);
+                (deleteDirectory ?? (path => Directory.Delete(path, true)))(stagingDir);
                 if (Directory.Exists(stagingDir))
                 {
-                    Directory.Delete(stagingDir, true);
+                    throw new IOException("The apply staging directory still exists after deletion.");
                 }
-                if (Directory.Exists(parent) && !Directory.EnumerateFileSystemEntries(parent).Any())
+                if (Directory.Exists(stagingParent) && !Directory.EnumerateFileSystemEntries(stagingParent).Any())
                 {
-                    Directory.Delete(parent, false);
+                    Directory.Delete(stagingParent, false);
+                }
+                return result;
+            }
+            catch (Exception deleteException)
+            {
+                try
+                {
+                    string quarantineParent = Path.Combine(outDir, "_apply-staging-quarantine");
+                    Directory.CreateDirectory(quarantineParent);
+                    string quarantineDir = UniquePath(Path.Combine(quarantineParent, Path.GetFileName(stagingDir)));
+                    Directory.Move(stagingDir, quarantineDir);
+                    string evidencePath = Path.Combine(quarantineDir, "cleanup-failure.txt");
+                    WriteTextFile(
+                        evidencePath,
+                        "Apply staging cleanup failed and the owned directory was quarantined.\n"
+                            + deleteException.GetType().Name + ": " + deleteException.Message + "\n");
+                    result.Status = "quarantined";
+                    result.EvidencePath = evidencePath;
+                    result.Message = "Apply staging cleanup failed; the owned directory was quarantined for explicit local cleanup.";
+                    return result;
+                }
+                catch (Exception quarantineException)
+                {
+                    result.Status = "failed";
+                    result.Message = "Apply staging cleanup and quarantine both failed; explicit local cleanup is required. Delete error: "
+                        + deleteException.Message + "; quarantine error: " + quarantineException.Message;
+                    try
+                    {
+                        string auditDir = Path.Combine(outDir, "_apply-staging-cleanup-audit");
+                        Directory.CreateDirectory(auditDir);
+                        result.EvidencePath = Path.Combine(auditDir, "failure-" + Guid.NewGuid().ToString("N") + ".txt");
+                        WriteTextFile(result.EvidencePath, result.Message + Environment.NewLine + "Path: " + stagingDir + Environment.NewLine);
+                    }
+                    catch
+                    {
+                        result.EvidencePath = stagingDir;
+                    }
+                    return result;
                 }
             }
-            catch
+        }
+
+        private static void AddApplyStagingCleanupGate(
+            List<ApplyCloneGateRecord> gates,
+            ApplyStagingCleanupResult cleanup,
+            bool savedProject,
+            bool operationCommitted)
+        {
+            string message;
+            if (cleanup.Removed)
             {
+                message = "Owned immutable apply staging was removed.";
             }
+            else if (operationCommitted)
+            {
+                message = "Operation committed; staging cleanup failed; path=" + cleanup.OriginalPath
+                    + "; recovery not required; local confidentiality cleanup required. " + cleanup.Message;
+            }
+            else
+            {
+                message = "Staging cleanup failed; path=" + cleanup.OriginalPath
+                    + "; local confidentiality cleanup required. Project recovery, if any, follows the primary apply result. " + cleanup.Message;
+            }
+
+            AddApplyCloneGate(
+                gates,
+                savedProject ? "after-save" : "after-write",
+                "apply-staging-cleanup",
+                cleanup.Removed ? "passed" : "warning",
+                false,
+                false,
+                true,
+                message,
+                cleanup.EvidencePath,
+                "owned staging removed",
+                cleanup.Status);
         }
 
         private static void ExecuteApplyClonePlan(
@@ -20939,6 +21264,21 @@ namespace OpennessLLM
                     item,
                     (BlockRecord)null,
                     "An explicit-new source already collides with a live TIA block. Pending provenance can be consumed only by a successful CreateBlock receipt with matching language and canonical source content; adopting or overwriting a pre-existing block is forbidden.");
+            }
+
+            bool mutatesExistingFromClone = EqualsIgnoreCase(item.Action, "UpdateSource")
+                || EqualsIgnoreCase(item.Action, "RenameBlock")
+                || EqualsIgnoreCase(item.Action, "RenameAndUpdateSource");
+            if (mutatesExistingFromClone
+                && !EqualsIgnoreCase(item.CloneProvenance, "tracked-baseline"))
+            {
+                AddPreflightIssue(
+                    result,
+                    "error",
+                    "UNKNOWN_ORPHANED_SOURCE_FORBIDDEN",
+                    item,
+                    (BlockRecord)null,
+                    "Updating or renaming an existing TIA block is authorized only by tracked-baseline provenance. Unknown, loose, or orphaned clone sources are nonactionable; recover them through sync-clone or explicit provenance repair.");
             }
 
             if (EqualsIgnoreCase(item.Action, "CreateBlock")
@@ -21786,14 +22126,18 @@ namespace OpennessLLM
                     "Severity", "SoftwarePath", "Action", "Status", "CurrentGroupPath", "CurrentGroupPathDisplay", "CurrentGroupPathKey", "CurrentName", "CurrentNumberSpace", "CurrentNumber",
                     "TargetGroupPath", "TargetGroupPathDisplay", "TargetGroupPathKey", "TargetName", "TargetNumberSpace", "TargetNumber", "SourcePath", "CloneProvenance",
                     "WillCreateGroup", "WillRename", "WillDelete", "ConsumesManifestRow", "ManifestSoftwarePath", "ManifestGroupPath", "ManifestName", "ManifestNumberSpace", "ManifestNumber", "ManifestFilePath", "WillGenerateSource",
-                    "LiveSourceDriftChecked", "LiveSourceStatus", "CurrentSourceSha256", "LiveSourceSha256", "LiveSourcePath", "Message"
+                    "LiveSourceDriftChecked", "LiveSourceStatus", "CurrentSourceSha256", "LiveSourceSha256", "LiveSourcePath",
+                    "ExecutionSourcePath", "ExecutionSourceSha256", "ExecutionSourceCanonicalSha256", "ExecutionSourceDeclarationName",
+                    "ExecutionLiveSourcePath", "ExecutionLiveSourceSha256", "ExecutionLiveSourceCanonicalSha256", "ExecutionLiveSourceDeclarationName", "Message"
                 },
                 plan.Select(x => new[]
                 {
                     PreflightSeverityForItem(x, issues), x.SoftwarePath, x.Action, x.Status, x.CurrentGroupPath, x.CurrentGroupPathDisplay, x.CurrentGroupPath, x.CurrentName, x.CurrentNumberSpace, x.CurrentNumber,
                     x.TargetGroupPath, x.TargetGroupPathDisplay, x.TargetGroupPath, x.TargetName, x.NumberSpace, x.TargetNumber, x.ClonePath, x.CloneProvenance,
                     x.WillCreateGroup.ToString(), x.WillRename.ToString(), x.WillDelete.ToString(), x.ConsumesManifestRow.ToString(), x.ManifestSoftwarePath, x.ManifestGroupPath, x.ManifestName, x.ManifestNumberSpace, x.ManifestNumber, x.ManifestFilePath, x.WillGenerateSource.ToString(),
-                    x.LiveSourceDriftChecked.ToString(), x.LiveSourceStatus, x.CurrentSourceSha256, x.LiveSourceSha256, x.LiveSourcePath, x.Message
+                    x.LiveSourceDriftChecked.ToString(), x.LiveSourceStatus, x.CurrentSourceSha256, x.LiveSourceSha256, x.LiveSourcePath,
+                    x.ExecutionSourcePath, x.ExecutionSourceSha256, x.ExecutionSourceCanonicalSha256, x.ExecutionSourceDeclarationName,
+                    x.ExecutionLiveSourcePath, x.ExecutionLiveSourceSha256, x.ExecutionLiveSourceCanonicalSha256, x.ExecutionLiveSourceDeclarationName, x.Message
                 }));
 
             WriteCsv(issuesPath,
@@ -22368,6 +22712,7 @@ namespace OpennessLLM
                 || EqualsIgnoreCase(status, "moved-or-renamed")
                 || EqualsIgnoreCase(status, "moved-or-renamed-and-changed")
                 || EqualsIgnoreCase(status, "object-replaced-or-mismatched")
+                || EqualsIgnoreCase(status, "object-id-continuity-unproven")
                 || EqualsIgnoreCase(status, "ambiguous-rename-and-renumber")
                 || EqualsIgnoreCase(status, "ambiguous-object-correlation")
                 || EqualsIgnoreCase(status, "export-error")
@@ -22587,6 +22932,14 @@ namespace OpennessLLM
                 { "currentSourceSha256", item.CurrentSourceSha256 },
                 { "liveSourceSha256", item.LiveSourceSha256 },
                 { "liveSourcePath", item.LiveSourcePath },
+                { "executionSourcePath", item.ExecutionSourcePath },
+                { "executionSourceSha256", item.ExecutionSourceSha256 },
+                { "executionSourceCanonicalSha256", item.ExecutionSourceCanonicalSha256 },
+                { "executionSourceDeclarationName", item.ExecutionSourceDeclarationName },
+                { "executionLiveSourcePath", item.ExecutionLiveSourcePath },
+                { "executionLiveSourceSha256", item.ExecutionLiveSourceSha256 },
+                { "executionLiveSourceCanonicalSha256", item.ExecutionLiveSourceCanonicalSha256 },
+                { "executionLiveSourceDeclarationName", item.ExecutionLiveSourceDeclarationName },
                 { "message", item.Message }
             };
         }
@@ -26904,6 +27257,10 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-check-bundle-safety-policy-revision", SelfTestCloneCheckBundleSafetyPolicyRevision);
             RunSelfTestCase(results, outDir, "clone-authorization-refresh-transaction", SelfTestCloneAuthorizationRefreshTransaction);
             RunSelfTestCase(results, outDir, "clone-object-id-baseline-correlation", SelfTestCloneObjectIdBaselineCorrelation);
+            RunSelfTestCase(results, outDir, "clone-ambiguous-visual-correlation", SelfTestCloneAmbiguousVisualCorrelation);
+            RunSelfTestCase(results, outDir, "clone-strong-no-id-shadow-correlation", SelfTestCloneStrongNoIdShadowCorrelation);
+            RunSelfTestCase(results, outDir, "clone-object-id-continuity-unproven", SelfTestCloneObjectIdContinuityUnproven);
+            RunSelfTestCase(results, outDir, "clone-explicit-new-excluded-from-weak-graph", SelfTestCloneExplicitNewExcludedFromWeakGraph);
             RunSelfTestCase(results, outDir, "clone-authorization-without-plc", SelfTestCloneAuthorizationWithoutPlc);
             RunSelfTestCase(results, outDir, "status-plc-failure-keeps-authorization-revoked", SelfTestStatusPlcFailureKeepsAuthorizationRevoked);
             RunSelfTestCase(results, outDir, "generate-source-missing-file-error", SelfTestGenerateSourceMissingFileError);
@@ -26932,6 +27289,10 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "apply-clone-strict-external-source-cleanup", SelfTestApplyCloneStrictExternalSourceCleanup);
             RunSelfTestCase(results, outDir, "project-backup-excludes-active-clone-workspace", SelfTestProjectBackupExcludesActiveCloneWorkspace);
             RunSelfTestCase(results, outDir, "apply-clone-rename-immutable-live-source", SelfTestApplyCloneRenameImmutableLiveSource);
+            RunSelfTestCase(results, outDir, "apply-clone-staging-toctou", SelfTestApplyCloneStagingToctou);
+            RunSelfTestCase(results, outDir, "apply-clone-fixed-postcondition-digest", SelfTestApplyCloneFixedPostconditionDigest);
+            RunSelfTestCase(results, outDir, "apply-clone-unknown-orphan-forbidden", SelfTestApplyCloneUnknownOrphanForbidden);
+            RunSelfTestCase(results, outDir, "apply-clone-staging-cleanup-audit", SelfTestApplyCloneStagingCleanupAudit);
             RunSelfTestCase(results, outDir, "init-workspace-force-active-lock", SelfTestInitWorkspaceForceWithActiveLock);
             RunSelfTestCase(results, outDir, "authoritative-snapshot-clean-project-guard", SelfTestAuthoritativeSnapshotCleanProjectGuard);
             RunSelfTestCase(results, outDir, "clone-check-snapshot-cleanup-on-failure", SelfTestCloneCheckSnapshotCleanupOnFailure);
@@ -28315,6 +28676,109 @@ namespace OpennessLLM
                 || EqualsIgnoreCase(x.Status, "removed")), "ambiguous no-ID correlation must not leak rename, delete, or create actions into a destructive plan");
         }
 
+        private static void SelfTestCloneAmbiguousVisualCorrelation(string caseDir)
+        {
+            string cloneAPath = Path.Combine(caseDir, "clone", "20_A.scl");
+            string cloneBPath = Path.Combine(caseDir, "clone", "21_B.scl");
+            string currentPath = Path.Combine(caseDir, "current", "20_Visual.scl");
+            WriteTextFile(cloneAPath, "FUNCTION_BLOCK \"A\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(cloneBPath, "FUNCTION_BLOCK \"B\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"Visual\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+
+            CloneBlockRecord cloneA = CreateSelfTestCloneIdentityRecord("A", "20", "20_A.scl", cloneAPath, true, string.Empty, "unavailable");
+            CloneBlockRecord cloneB = CreateSelfTestCloneIdentityRecord("B", "21", "21_B.scl", cloneBPath, true, string.Empty, "unavailable");
+            CloneBlockRecord visual = CreateSelfTestCloneIdentityRecord("Visual", "20", "20_Visual.scl", currentPath, false, string.Empty, "unavailable");
+            visual.ProgrammingLanguage = "LAD";
+            visual.ExportStatus = "unsupported-language";
+            visual.ExportMessage = "LAD source export is unavailable.";
+
+            List<CloneDiffRecord> diffs = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { cloneA, cloneB },
+                new List<CloneBlockRecord> { visual });
+            AssertEqual("1", diffs.Count.ToString(CultureInfo.InvariantCulture), "all tracked candidates must be reserved by the ambiguous visual component");
+            AssertEqual("ambiguous-object-correlation", diffs[0].Status, "correlation ambiguity must take priority over unsupported-language classification");
+            AssertTrue(diffs[0].Message.IndexOf("source export", StringComparison.OrdinalIgnoreCase) >= 0, "ambiguity evidence must retain the unsupported-source detail");
+            AssertTrue(!diffs.Any(x => EqualsIgnoreCase(x.Status, "removed")), "ambiguous visual candidates must not leak delete rows");
+            AssertTrue(IsApplyCloneDirtyStatus(diffs[0].Status), "ambiguous visual correlation must block apply and sync before staging");
+
+            string reportPath = Path.Combine(caseDir, "clone-check-source-blockers.csv");
+            WriteCloneCheckSourceBlockerReport(reportPath, diffs);
+            List<Dictionary<string, string>> reportRows = ReadCsv(reportPath);
+            AssertEqual("1", reportRows.Count.ToString(CultureInfo.InvariantCulture), "ambiguous visual correlation must appear in the dedicated blocker report");
+            AssertEqual("error", GetCsvValue(reportRows[0], "Severity"), "ambiguous visual correlation must be Severity=error");
+        }
+
+        private static void SelfTestCloneStrongNoIdShadowCorrelation(string caseDir)
+        {
+            string clonePath = Path.Combine(caseDir, "clone", "20_Foo.scl");
+            string replacementPath = Path.Combine(caseDir, "current", "20_Foo.scl");
+            string movedPath = Path.Combine(caseDir, "current", "30_Foo_New.scl");
+            WriteTextFile(clonePath, "FUNCTION_BLOCK \"Foo\"\nBEGIN\n #value := 1;\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(replacementPath, "FUNCTION_BLOCK \"Foo\"\nBEGIN\n #value := 999;\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(movedPath, "FUNCTION_BLOCK \"Foo_New\"\nBEGIN\n #value := 1;\nEND_FUNCTION_BLOCK\n");
+
+            CloneBlockRecord clone = CreateSelfTestCloneIdentityRecord("Foo", "20", "20_Foo.scl", clonePath, true, string.Empty, "unavailable");
+            CloneBlockRecord replacement = CreateSelfTestCloneIdentityRecord("Foo", "20", "20_Foo.scl", replacementPath, false, string.Empty, "unavailable");
+            CloneBlockRecord moved = CreateSelfTestCloneIdentityRecord("Foo_New", "30", "30_Foo_New.scl", movedPath, false, string.Empty, "unavailable");
+            List<CloneDiffRecord> diffs = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { clone },
+                new List<CloneBlockRecord> { replacement, moved });
+
+            AssertEqual("2", diffs.Count.ToString(CultureInfo.InvariantCulture), "replacement and source-equivalent moved candidate must remain visible");
+            AssertTrue(diffs.All(x => EqualsIgnoreCase(x.Status, "ambiguous-object-correlation")), "a strong no-ID replacement must not bypass the global weak graph");
+            AssertTrue(!diffs.Any(x => EqualsIgnoreCase(x.Status, "changed")
+                || EqualsIgnoreCase(x.Status, "moved-or-renamed")
+                || EqualsIgnoreCase(x.Status, "removed")), "ambiguous shadow correlation must not authorize update, rename, or delete");
+        }
+
+        private static void SelfTestCloneObjectIdContinuityUnproven(string caseDir)
+        {
+            string clonePath = Path.Combine(caseDir, "clone", "20_Foo.scl");
+            string currentPath = Path.Combine(caseDir, "current", "20_Foo.scl");
+            WriteTextFile(clonePath, "FUNCTION_BLOCK \"Foo\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"Foo\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            CloneBlockRecord clone = CreateSelfTestCloneIdentityRecord("Foo", "20", "20_Foo.scl", clonePath, true, "ID-1", "ok");
+            CloneBlockRecord current = CreateSelfTestCloneIdentityRecord("Foo", "20", "20_Foo.scl", currentPath, false, string.Empty, "unavailable");
+
+            CloneDiffRecord diff = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { clone },
+                new List<CloneBlockRecord> { current }).Single();
+            AssertEqual("object-id-continuity-unproven", diff.Status, "usable baseline ID plus unavailable current ID must never become unchanged");
+            AssertEqual("ID-1", diff.CloneTiaObjectId, "the durable baseline ID must remain in evidence");
+            AssertTrue(IsApplyCloneDirtyStatus(diff.Status), "unproven durable ID continuity must block apply");
+            bool syncRejected = false;
+            try
+            {
+                EnsureSyncCloneRowsSafe(new List<Dictionary<string, string>>
+                {
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { "Status", diff.Status }, { "Name", "Foo" } }
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                syncRejected = true;
+            }
+            AssertTrue(syncRejected, "sync must not overwrite the manifest and erase a prior durable ID");
+        }
+
+        private static void SelfTestCloneExplicitNewExcludedFromWeakGraph(string caseDir)
+        {
+            string clonePath = Path.Combine(caseDir, "clone", "20_New.scl");
+            string currentPath = Path.Combine(caseDir, "current", "99_Existing.scl");
+            WriteTextFile(clonePath, "FUNCTION_BLOCK \"New\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            WriteTextFile(currentPath, "FUNCTION_BLOCK \"Existing\"\nBEGIN\nEND_FUNCTION_BLOCK\n");
+            CloneBlockRecord explicitNew = CreateSelfTestCloneIdentityRecord("New", "20", "20_New.scl", clonePath, true, string.Empty, "unavailable");
+            explicitNew.Provenance = "explicit-new-local-source";
+            CloneBlockRecord existing = CreateSelfTestCloneIdentityRecord("Existing", "99", "99_Existing.scl", currentPath, false, string.Empty, "unavailable");
+
+            List<CloneDiffRecord> diffs = BuildCloneBlockDiffs(
+                new List<CloneBlockRecord> { explicitNew },
+                new List<CloneBlockRecord> { existing });
+            AssertTrue(!diffs.Any(x => IsCloneCorrelationAmbiguityStatus(x.Status)), "explicit-new sources must not enter the weak rename/renumber graph");
+            AssertTrue(diffs.Any(x => EqualsIgnoreCase(x.Status, "added") && EqualsIgnoreCase(x.CurrentName, "Existing")), "unrelated current block must remain a distinct addition");
+            AssertTrue(diffs.Any(x => EqualsIgnoreCase(x.Status, "removed") && EqualsIgnoreCase(x.CloneName, "New")), "explicit-new source must remain a distinct create candidate");
+        }
+
         private static CloneBlockRecord CreateSelfTestCloneIdentityRecord(
             string name,
             string number,
@@ -29667,6 +30131,7 @@ namespace OpennessLLM
                 ProgrammingLanguage = "SCL",
                 ExecutionSourcePath = expectedSource
             };
+            CaptureApplyExecutionSourceEvidence(item, expectedSource, false);
             Dictionary<string, string> row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "Status", "changed" }, { "CurrentSoftwarePath", "PLC" }, { "CurrentGroupPath", string.Empty },
@@ -29692,6 +30157,7 @@ namespace OpennessLLM
             AssertTrue(unchangedRejected, "UpdateSource returning without the requested content must be rejected before reconciliation");
 
             WriteTextFile(expectedSource, "FUNCTION_BLOCK \"A\"\nBEGIN\n // requested documentation\n #Value := 2;\nEND_FUNCTION_BLOCK\n");
+            CaptureApplyExecutionSourceEvidence(item, expectedSource, false);
             WriteTextFile(actualSource, "FUNCTION_BLOCK \"A\"\nBEGIN\n // old documentation\n #Value := 2;\nEND_FUNCTION_BLOCK\n");
             row["CurrentSourceSha256"] = ComputeFileSha256(actualSource);
             bool commentOnlyRejected = false;
@@ -29909,7 +30375,8 @@ namespace OpennessLLM
                 CheckRunId = "rename-stage",
                 WorkspaceRows = CloneWorkspaceInventoryRows(BuildCloneWorkspaceInventory(cloneDir))
             };
-            string stagingDir = StageApplyClonePlanSources(cloneDir, stagingBundle, new List<ApplyPlanItem> { item }, rootDir);
+            ApplyStagingLease stagingLease;
+            string stagingDir = StageApplyClonePlanSources(cloneDir, stagingBundle, new List<ApplyPlanItem> { item }, rootDir, out stagingLease);
             try
             {
                 AssertTrue(File.Exists(item.ExecutionLiveSourcePath), "pure rename must stage authoritative live source bytes immutably");
@@ -29948,8 +30415,171 @@ namespace OpennessLLM
             }
             finally
             {
-                TryDeleteApplyStaging(stagingDir);
+                stagingLease.Dispose();
+                CleanupApplyStaging(stagingDir);
             }
+        }
+
+        private static void SelfTestApplyCloneStagingToctou(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string rootDir = Path.Combine(cloneDir, "_root");
+            string clonePath = Path.Combine(rootDir, "1_A.scl");
+            WriteTextFile(clonePath, "FUNCTION_BLOCK \"A\"\nBEGIN\n #value := 1;\nEND_FUNCTION_BLOCK\n");
+            ApplyPlanItem item = new ApplyPlanItem
+            {
+                Action = "CreateBlock",
+                TargetName = "A",
+                ProgrammingLanguage = "SCL",
+                ClonePath = clonePath,
+                CloneSourceSha256 = ComputeFileSha256(clonePath),
+                WillGenerateSource = true
+            };
+            CloneCheckBundleEvidence bundle = new CloneCheckBundleEvidence
+            {
+                CheckRunId = "staging-toctou",
+                WorkspaceRows = CloneWorkspaceInventoryRows(BuildCloneWorkspaceInventory(cloneDir))
+            };
+
+            ApplyStagingLease lease;
+            string stagingDir = StageApplyClonePlanSources(cloneDir, bundle, new List<ApplyPlanItem> { item }, rootDir, out lease);
+            try
+            {
+                bool tamperBeforeCreateRejected = false;
+                try
+                {
+                    WriteTextFile(item.ExecutionSourcePath, "FUNCTION_BLOCK \"A\"\nBEGIN\n #attacker := 1;\nEND_FUNCTION_BLOCK\n");
+                }
+                catch (IOException)
+                {
+                    tamperBeforeCreateRejected = true;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    tamperBeforeCreateRejected = true;
+                }
+                AssertTrue(tamperBeforeCreateRejected, "a staged source tamper before CreateBlock must be rejected while the read lease is held");
+
+                bool tamperDuringBackupRejected = false;
+                try
+                {
+                    using (FileStream attacker = new FileStream(item.ExecutionSourcePath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        attacker.WriteByte(1);
+                    }
+                }
+                catch (IOException)
+                {
+                    tamperDuringBackupRejected = true;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    tamperDuringBackupRejected = true;
+                }
+                AssertTrue(tamperDuringBackupRejected, "a staged source tamper during a long backup must be rejected by the held read lease");
+
+                WriteTextFile(clonePath, "FUNCTION_BLOCK \"A\"\nBEGIN\n #workspace_drift := 1;\nEND_FUNCTION_BLOCK\n");
+                bool writeInvoked = false;
+                try
+                {
+                    ValidateCloneWorkspaceInventory(cloneDir, bundle.WorkspaceRows);
+                    ValidateApplyStagingDigests(new List<ApplyPlanItem> { item });
+                    writeInvoked = true;
+                }
+                catch (InvalidDataException)
+                {
+                }
+                AssertTrue(!writeInvoked, "workspace drift during backup must fail the post-backup gate before the first TIA write");
+            }
+            finally
+            {
+                lease.Dispose();
+                CleanupApplyStaging(stagingDir);
+            }
+        }
+
+        private static void SelfTestApplyCloneFixedPostconditionDigest(string caseDir)
+        {
+            string stagedSource = Path.Combine(caseDir, "staged.scl");
+            string postSource = Path.Combine(caseDir, "post.scl");
+            WriteTextFile(stagedSource, "FUNCTION_BLOCK \"A\"\nBEGIN\n #authorized := 1;\nEND_FUNCTION_BLOCK\n");
+            ApplyPlanItem item = new ApplyPlanItem
+            {
+                Action = "UpdateSource",
+                SoftwarePath = "PLC",
+                CurrentGroupPath = string.Empty,
+                CurrentName = "A",
+                CurrentNumberSpace = "FB",
+                CurrentNumber = "1",
+                TargetGroupPath = string.Empty,
+                TargetName = "A",
+                TargetNumber = "1",
+                NumberSpace = "FB",
+                DesiredNumber = 1,
+                ProgrammingLanguage = "SCL"
+            };
+            CaptureApplyExecutionSourceEvidence(item, stagedSource, false);
+
+            string attackerSource = "FUNCTION_BLOCK \"A\"\nBEGIN\n #attacker := 999;\nEND_FUNCTION_BLOCK\n";
+            WriteTextFile(stagedSource, attackerSource);
+            WriteTextFile(postSource, attackerSource);
+            Dictionary<string, string> row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Status", "changed" }, { "CurrentSoftwarePath", "PLC" }, { "CurrentGroupPath", string.Empty },
+                { "CurrentName", "A" }, { "CurrentNumberSpace", "FB" }, { "CurrentNumber", "1" },
+                { "CurrentProgrammingLanguage", "SCL" }, { "CurrentPath", postSource },
+                { "CurrentSourceSha256", ComputeFileSha256(postSource) }
+            };
+            bool rejected = false;
+            try
+            {
+                ValidateApplyClonePostconditionContent(new List<Dictionary<string, string>> { row }, item);
+            }
+            catch (InvalidDataException ex)
+            {
+                rejected = ex.Message.IndexOf("token stream", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            AssertTrue(rejected, "tampering with staged and post-write files to the same bytes must still fail against the fixed canonical digest");
+        }
+
+        private static void SelfTestApplyCloneUnknownOrphanForbidden(string caseDir)
+        {
+            string rootDir = Path.Combine(caseDir, "_root");
+            ApplyPlanItem item = CreateSelfTestApplyPlanItem(rootDir, "UpdateSource", "Foo", 20, "SCL", "Siemens.Engineering.SW.Blocks.FB", true, ".scl");
+            item.CloneProvenance = "unknown-orphaned";
+            ApplyPreflightResult result = RunApplyClonePreflight(
+                new List<ApplyPlanItem> { item },
+                CreateSelfTestApplySnapshot(item.Existing),
+                rootDir,
+                false);
+            AssertTrue(result.Issues.Any(issue => EqualsIgnoreCase(issue.Code, "UNKNOWN_ORPHANED_SOURCE_FORBIDDEN")), "unknown orphan source must be nonactionable for UpdateSource");
+            bool writeInvoked = result.ErrorCount == 0;
+            AssertTrue(!writeInvoked, "unknown orphan source must fail preflight before any TIA write");
+        }
+
+        private static void SelfTestApplyCloneStagingCleanupAudit(string caseDir)
+        {
+            string stagingDir = Path.Combine(caseDir, "_apply-staging", "run-committed");
+            WriteTextFile(Path.Combine(stagingDir, ApplyStagingOwnerMarkerFileName), "owned\n");
+            WriteTextFile(Path.Combine(stagingDir, "sources", "0000.scl"), "FUNCTION_BLOCK \"A\"\nEND_FUNCTION_BLOCK\n");
+            ApplyStagingCleanupResult cleanup = CleanupApplyStaging(
+                stagingDir,
+                delegate(string path) { throw new IOException("simulated cleanup failure after commit"); });
+
+            AssertEqual("quarantined", cleanup.Status, "failed committed cleanup must quarantine the owned staging directory");
+            AssertTrue(!Directory.Exists(stagingDir), "the failed cleanup target must no longer remain in active apply staging");
+            AssertTrue(File.Exists(cleanup.EvidencePath), "cleanup failure must leave an auditable evidence file");
+            List<ApplyCloneGateRecord> gates = new List<ApplyCloneGateRecord>();
+            AddApplyStagingCleanupGate(gates, cleanup, true, true);
+            AssertEqual("warning", gates.Single().Status, "committed cleanup failure must be an audited warning");
+            AssertTrue(!gates.Single().Blocking, "committed cleanup warning must not invalidate the completed operation");
+            AssertTrue(gates.Single().Message.IndexOf("Operation committed", StringComparison.OrdinalIgnoreCase) >= 0
+                && gates.Single().Message.IndexOf("recovery not required", StringComparison.OrdinalIgnoreCase) >= 0
+                && gates.Single().Message.IndexOf("local confidentiality cleanup required", StringComparison.OrdinalIgnoreCase) >= 0,
+                "committed cleanup report must carry the required recovery and confidentiality guidance");
+            string state = ApplyCloneState(true, true, true, true, true, 1);
+            AssertEqual("accepted_after_write", state, "cleanup failure must not turn an already committed apply into ambiguous failure");
+            AssertEqual("No recovery required.", ApplyCloneRecoveryInstruction(state, true, true), "committed cleanup warning must not request project recovery");
         }
 
         private static void SelfTestInitWorkspaceForceWithActiveLock(string caseDir)
@@ -30544,6 +31174,7 @@ namespace OpennessLLM
                 NumberMode = "Manual",
                 DesiredNumber = number,
                 ClonePath = clonePath,
+                CloneProvenance = EqualsIgnoreCase(action, "CreateBlock") ? "explicit-new-local-source" : "tracked-baseline",
                 Existing = existing,
                 WillCreateGroup = false,
                 WillGenerateSource = EqualsIgnoreCase(action, "CreateBlock") || EqualsIgnoreCase(action, "UpdateSource") || EqualsIgnoreCase(action, "RenameAndUpdateSource"),
@@ -32994,7 +33625,13 @@ namespace OpennessLLM
             public string InstanceOfName;
             public string ClonePath;
             public string ExecutionSourcePath;
+            public string ExecutionSourceSha256;
+            public string ExecutionSourceCanonicalSha256;
+            public string ExecutionSourceDeclarationName;
             public string ExecutionLiveSourcePath;
+            public string ExecutionLiveSourceSha256;
+            public string ExecutionLiveSourceCanonicalSha256;
+            public string ExecutionLiveSourceDeclarationName;
             public string CurrentPath;
             public BlockRecord Existing;
             public bool TargetGroupDiffers;
@@ -33270,9 +33907,44 @@ namespace OpennessLLM
             public string CurrentNormalizedSourceSha256;
             public string CurrentRelativePath;
             public string CurrentPath;
+            public string CurrentExportStatus;
             // Durable clone-side origin classification.
             public string CloneProvenance;
             public string Message;
+        }
+
+        private sealed class ApplyStagingLease : IDisposable
+        {
+            private readonly List<FileStream> _handles = new List<FileStream>();
+
+            public string DirectoryPath;
+
+            public void HoldReadLock(string path)
+            {
+                _handles.Add(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read));
+            }
+
+            public void Dispose()
+            {
+                foreach (FileStream handle in _handles)
+                {
+                    handle.Dispose();
+                }
+                _handles.Clear();
+            }
+        }
+
+        private sealed class ApplyStagingCleanupResult
+        {
+            public string Status;
+            public string OriginalPath;
+            public string EvidencePath;
+            public string Message;
+
+            public bool Removed
+            {
+                get { return EqualsIgnoreCase(Status, "removed"); }
+            }
         }
 
         private sealed class ApplyPreStateValidationResult
