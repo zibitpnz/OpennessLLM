@@ -4,6 +4,31 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.7 closes the review of head `62cc2e9`. Sync and post-save apply
+  publication now derive a fixed expected model from the authoritative bundle,
+  immutable leased inputs, and fixed logical destinations. Every block/group
+  manifest field, JSONL row, metadata path, required file, directory, source,
+  and sidecar is compared with that model before a package can be sealed;
+  metadata is no longer regenerated from a mutable CSV.
+- Publication journal schema 2 has an exact property contract and binds the
+  canonical workspace, operation, transaction ID, immutable package hash,
+  staging-owner hash, and all old/new component fingerprints. Recovery validates
+  the complete transaction without mutation first. A stale, forged, corrupted,
+  or cross-operation record fails closed, and `oldExists=false` never authorizes
+  deletion unless the active object is proven to be the recorded new component.
+- Every transaction backup records `publication-completion.json` with an
+  unambiguous `not_committed`, `committed`, or
+  `committed_with_diagnostic_failure` state. A locked final sync/apply report no
+  longer converts an already committed publication into a repeat/recovery
+  instruction.
+- Regression coverage is now `97/97`: it includes post-proof apply tampering,
+  coordinated CSV/JSONL durable-evidence downgrade, swapped source paths,
+  forged journal variants, locked post-commit reports, all journal phases, and
+  an actual child process killed after installing `_root`.
+- The recovery guarantee is explicitly scoped to managed failures and abrupt
+  process termination with Windows filesystem state preserved. Sudden power
+  loss, kernel failure, controller cache loss, and storage ordering are not
+  claimed without a volume-level durability design and VM/volume fault tests.
 - Version 0.12.6 closes the review-a4 sync/publication gaps. `sync-clone`
   copies every signed workspace/current source through hash-checked owned input
   files while the source handle denies writes and replacement. The completed

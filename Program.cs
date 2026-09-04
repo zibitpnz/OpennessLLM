@@ -17,25 +17,28 @@ using Microsoft.Win32;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.6.0")]
-[assembly: AssemblyFileVersion("0.12.6.0")]
+[assembly: AssemblyVersion("0.12.7.0")]
+[assembly: AssemblyFileVersion("0.12.7.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.6";
+        private const string ProductVersion = "0.12.7";
         private const string ProductVersionDate = "2026-09-04";
         private const string ProductCreator = "Zibitpnz";
-        private const string CloneCheckBundleSchemaVersion = "6";
+        private const string CloneCheckBundleSchemaVersion = "7";
         private const string CloneMatcherRevision = "global-object-correlation-v5";
-        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v7";
+        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v8";
         private const string ApplyStagingOwnerMarkerFileName = ".opennessllm-apply-staging-owner";
         private const string ApplyValidationOwnerMarkerFileName = ".opennessllm-apply-validation-owner";
         private const string SyncStagingOwnerMarkerFileName = ".opennessllm-sync-staging-owner";
         private const string SyncPublicationPackageFileName = ".opennessllm-publication.zip";
         private const string PublicationTransactionFileName = ".opennessllm-publication-transaction.json";
+        private const string PublicationJournalSchemaVersion = "2";
+        private const string PublicationOwnerMarkerSchemaVersion = "1";
+        private const string PublicationResultSchemaVersion = "1";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
         private const string CloneCheckAttemptFileName = "clone-check-attempt.json";
         private const string CloneCheckBlockFileName = "clone-check-blocks.csv";
@@ -674,6 +677,12 @@ namespace OpennessLLM
                 {
                     Console.WriteLine("Workspace lock acquired: " + cloneDir);
                 }
+                return;
+            }
+
+            if (EqualsIgnoreCase(options.Command, "self-test-publication-crash-child"))
+            {
+                SelfTestPublicationCrashChild(options.OutDir);
                 return;
             }
 
@@ -16357,13 +16366,16 @@ namespace OpennessLLM
             int errors = 0;
             SyncStagingLease syncLease = new SyncStagingLease { DirectoryPath = stagingDir };
             SyncInputSet syncInputs = null;
+            PublicationExpectedModel expectedPublication = null;
+            PublicationCommitResult publicationCommit = null;
 
             try
             {
                 Directory.CreateDirectory(stagingDir);
-                WriteTextFile(
+                WritePublicationStagingOwnerMarker(
                     Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName),
-                    "OpennessLLM sync staging\ncheckRunId=" + EmptyIfNull(bundle.CheckRunId) + "\n");
+                    "sync-clone",
+                    bundle.CheckRunId);
                 syncInputs = StageImmutableSyncInputs(outDir, bundle, stagingDir, syncLease, null);
                 CopyDirectory(Path.Combine(syncInputs.WorkspaceRoot, "_root"), stagingRoot, false);
                 ValidateStagedRootAgainstWorkspaceInventory(stagingRoot, bundle.WorkspaceRows);
@@ -16461,13 +16473,16 @@ namespace OpennessLLM
                 try
                 {
                     ValidateStagedSyncSourcesAndSidecars(stagingRoot, rootDir, compareRootDir, blockRows, bundle.WorkspaceRows);
-                    WriteSyncedBlockManifest(stagedBlockManifest, syncInputs.BlockManifestPath, rootDir, stagingRoot, compareRootDir, blockRows);
-                    WriteSyncedGroupManifest(stagedGroupManifest, syncInputs.GroupManifestPath, rootDir, bundle.GroupRows);
-                    WriteCloneMetadata(stagingDir, outDir, stagedBlockManifest, stagedGroupManifest);
+                    expectedPublication = BuildPublicationExpectedModel(
+                        outDir,
+                        bundle,
+                        stagingDir,
+                        rootDir,
+                        compareRootDir,
+                        syncInputs);
+                    WriteExpectedPublicationArtifacts(stagingDir, expectedPublication);
                     ValidateStagedSyncSourcesAndSidecars(stagingRoot, rootDir, compareRootDir, blockRows, bundle.WorkspaceRows);
-                    ValidateStagedSyncManifest(stagingDir, outDir, stagingRoot, blockRows);
-                    ValidateStagedSyncGroupManifest(stagingDir, outDir, bundle);
-                    ValidateStagedSyncMetadata(stagingDir, outDir);
+                    ValidateExpectedPublicationArtifacts(stagingDir, expectedPublication);
                 }
                 catch (Exception ex)
                 {
@@ -16486,7 +16501,7 @@ namespace OpennessLLM
 
             try
             {
-                SealSyncStaging(outDir, bundle, stagingDir, rootDir, compareRootDir, syncLease);
+                SealSyncStaging(outDir, bundle, stagingDir, rootDir, compareRootDir, expectedPublication, syncLease);
             }
             catch (Exception ex)
             {
@@ -16514,7 +16529,20 @@ namespace OpennessLLM
             try
             {
                 ValidateSealedSyncStaging(stagingDir, syncLease);
-                CommitStagedSyncWorkspace(outDir, stagingDir, backupDir, "sync-clone", syncLease.PackagePath, syncLease.PackageSha256, null);
+                publicationCommit = CommitStagedSyncWorkspace(outDir, stagingDir, backupDir, "sync-clone", syncLease.PackagePath, syncLease.PackageSha256, null);
+            }
+            catch (PublicationCommittedDiagnosticException committedDiagnostic)
+            {
+                publicationCommit = committedDiagnostic.CommitResult;
+                report.Add(SyncReportRow(
+                    "completion-diagnostic",
+                    "PUBLICATION",
+                    stagingDir,
+                    string.Empty,
+                    publicationCommit == null ? string.Empty : publicationCommit.CompletionResultPath,
+                    "warning",
+                    committedDiagnostic.Message));
+                Console.WriteLine("WARNING: " + committedDiagnostic.Message);
             }
             catch
             {
@@ -16523,7 +16551,16 @@ namespace OpennessLLM
                 throw;
             }
             syncLease.Dispose();
-            ApplyStagingCleanupResult syncCleanup = CleanupSyncStaging(stagingDir);
+            string retainedJournalPath = Path.Combine(outDir, PublicationTransactionFileName);
+            ApplyStagingCleanupResult syncCleanup = File.Exists(retainedJournalPath)
+                ? new ApplyStagingCleanupResult
+                {
+                    Status = "retained-for-committed-journal",
+                    OriginalPath = stagingDir,
+                    EvidencePath = retainedJournalPath,
+                    Message = "Committed journal still owns the immutable package; the next clone command will verify the committed state and clean this staging."
+                }
+                : CleanupSyncStaging(stagingDir);
             report.Add(SyncReportRow(
                 "cleanup",
                 "SYNC-STAGING",
@@ -16534,7 +16571,16 @@ namespace OpennessLLM
                 syncCleanup.Removed
                     ? "Owned immutable sync staging and publication package were removed."
                     : "Baseline committed; recovery is not required, but local confidentiality cleanup is required. " + syncCleanup.Message));
-            WriteSyncCloneReports(outDir, compareDir, backupDir, report, updated, added, removed, moved, skipped, errors, true);
+            bool syncReportsWritten = false;
+            Exception syncReportFailure;
+            syncReportsWritten = TryWriteCommittedPublicationDiagnostics(
+                publicationCommit,
+                "sync-clone",
+                delegate
+                {
+                    WriteSyncCloneReports(outDir, compareDir, backupDir, report, updated, added, removed, moved, skipped, errors, true);
+                },
+                out syncReportFailure);
 
             Console.WriteLine("Clone sync completed.");
             Console.WriteLine("Clone directory: " + outDir);
@@ -16548,10 +16594,13 @@ namespace OpennessLLM
             Console.WriteLine("Errors: " + errors);
             if (!syncCleanup.Removed)
             {
-                Console.WriteLine("WARNING: sync staging cleanup requires local attention: " + syncCleanup.Message + " Path: " + syncCleanup.EvidencePath);
+                Console.WriteLine("WARNING: sync staging cleanup is deferred or requires local attention: " + syncCleanup.Message + " Path: " + syncCleanup.EvidencePath);
             }
-            Console.WriteLine("Sync report written to: " + reportPath);
-            Console.WriteLine("Summary written to: " + Path.Combine(outDir, "sync-clone-summary.txt"));
+            if (syncReportsWritten)
+            {
+                Console.WriteLine("Sync report written to: " + reportPath);
+                Console.WriteLine("Summary written to: " + Path.Combine(outDir, "sync-clone-summary.txt"));
+            }
         }
 
         private static string[] SyncReportRow(string checkStatus, string name, string clonePath, string currentPath, string destinationPath, string syncStatus, string message)
@@ -17043,19 +17092,17 @@ namespace OpennessLLM
             }
         }
 
-        private static void ValidateStagedSyncMetadata(string stagingDir, string logicalOutDir)
+        private static void ValidateStagedSyncMetadata(string stagingDir, PublicationExpectedModel model)
         {
             string metadataDir = Path.Combine(stagingDir, "_metadata");
             string schemaPath = Path.Combine(metadataDir, "schema-version.txt");
-            string blocksPath = Path.Combine(stagingDir, "plc-blocks.csv");
-            string groupsPath = Path.Combine(stagingDir, "block-groups.csv");
             if (!File.Exists(schemaPath) || !EqualsIgnoreCase(File.ReadAllText(schemaPath, Encoding.UTF8).Trim(), "4"))
             {
                 throw new InvalidDataException("Staged sync metadata has an invalid schema marker.");
             }
 
-            List<Dictionary<string, string>> blocks = ReadCsv(blocksPath);
-            List<Dictionary<string, string>> groups = ReadCsv(groupsPath);
+            List<Dictionary<string, string>> blocks = model.BlockRows;
+            List<Dictionary<string, string>> groups = model.GroupRows;
             ValidateJsonlRowsEqual(Path.Combine(metadataDir, "blocks.jsonl"), blocks.Select(NormalizeBlockMetadataRow).ToList(), "staged block metadata");
             ValidateJsonlRowsEqual(Path.Combine(metadataDir, "groups.jsonl"), groups.Select(NormalizeGroupMetadataRow).ToList(), "staged group metadata");
 
@@ -17072,16 +17119,17 @@ namespace OpennessLLM
             if (cloneManifest.Count != cloneManifestKeys.Length
                 || cloneManifestKeys.Any(key => !cloneManifest.ContainsKey(key))
                 || !DateTime.TryParse(SidecarValue(cloneManifest, "generatedAt"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out generatedAt)
+                || !string.Equals(SidecarValue(cloneManifest, "generatedAt"), model.MetadataGeneratedAt, StringComparison.Ordinal)
                 || !int.TryParse(SidecarValue(cloneManifest, "blockCount"), NumberStyles.None, CultureInfo.InvariantCulture, out blockCount)
                 || !int.TryParse(SidecarValue(cloneManifest, "groupCount"), NumberStyles.None, CultureInfo.InvariantCulture, out groupCount)
                 || blockCount != blocks.Count
                 || groupCount != groups.Count
                 || !EqualsIgnoreCase(SidecarValue(cloneManifest, "schemaVersion"), "4")
-                || !EqualsIgnoreCase(SidecarValue(cloneManifest, "cloneDirectory"), logicalOutDir)
-                || !EqualsIgnoreCase(SidecarValue(cloneManifest, "blocksCsv"), Path.Combine(logicalOutDir, "plc-blocks.csv"))
-                || !EqualsIgnoreCase(SidecarValue(cloneManifest, "groupsCsv"), Path.Combine(logicalOutDir, "block-groups.csv"))
-                || !EqualsIgnoreCase(SidecarValue(cloneManifest, "blocksJsonl"), Path.Combine(logicalOutDir, "_metadata", "blocks.jsonl"))
-                || !EqualsIgnoreCase(SidecarValue(cloneManifest, "groupsJsonl"), Path.Combine(logicalOutDir, "_metadata", "groups.jsonl"))
+                || !string.Equals(SidecarValue(cloneManifest, "cloneDirectory"), model.LogicalOutDir, StringComparison.Ordinal)
+                || !string.Equals(SidecarValue(cloneManifest, "blocksCsv"), Path.Combine(model.LogicalOutDir, "plc-blocks.csv"), StringComparison.Ordinal)
+                || !string.Equals(SidecarValue(cloneManifest, "groupsCsv"), Path.Combine(model.LogicalOutDir, "block-groups.csv"), StringComparison.Ordinal)
+                || !string.Equals(SidecarValue(cloneManifest, "blocksJsonl"), Path.Combine(model.LogicalOutDir, "_metadata", "blocks.jsonl"), StringComparison.Ordinal)
+                || !string.Equals(SidecarValue(cloneManifest, "groupsJsonl"), Path.Combine(model.LogicalOutDir, "_metadata", "groups.jsonl"), StringComparison.Ordinal)
                 || !EqualsIgnoreCase(SidecarValue(cloneManifest, "sidecarConvention"), "<source-file>.meta.json"))
             {
                 throw new InvalidDataException("Staged clone-manifest metadata contradicts the staged manifests or logical workspace paths.");
@@ -17129,7 +17177,7 @@ namespace OpennessLLM
             for (int i = 0; i < actual.Count; i++)
             {
                 if (actual[i].Count != expected[i].Count
-                    || expected[i].Any(pair => !EqualsIgnoreCase(SidecarValue(actual[i], pair.Key), pair.Value)))
+                    || expected[i].Any(pair => !string.Equals(SidecarValue(actual[i], pair.Key), pair.Value, StringComparison.Ordinal)))
                 {
                     throw new InvalidDataException(label + " row " + (i + 1).ToString(CultureInfo.InvariantCulture) + " contradicts its CSV manifest.");
                 }
@@ -17142,10 +17190,12 @@ namespace OpennessLLM
             string stagingDir,
             string rootDir,
             string compareRootDir,
+            PublicationExpectedModel expectedModel,
             SyncStagingLease lease)
         {
-            HashSet<string> expectedFiles = BuildExpectedSyncPublishFiles(bundle, stagingDir, rootDir, compareRootDir);
-            HashSet<string> expectedDirectories = BuildExpectedSyncPublishDirectories(bundle, stagingDir, expectedFiles);
+            if (expectedModel == null) throw new InvalidDataException("Sync publication has no immutable expected model.");
+            HashSet<string> expectedFiles = new HashSet<string>(expectedModel.ExpectedFiles, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> expectedDirectories = new HashSet<string>(expectedModel.ExpectedDirectories, StringComparer.OrdinalIgnoreCase);
             ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
             foreach (string relativePath in expectedFiles.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
             {
@@ -17153,9 +17203,7 @@ namespace OpennessLLM
             }
             ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
             ValidateStagedSyncSourcesAndSidecars(Path.Combine(stagingDir, "_root"), rootDir, compareRootDir, bundle.BlockRows, bundle.WorkspaceRows);
-            ValidateStagedSyncManifest(stagingDir, outDir, Path.Combine(stagingDir, "_root"), bundle.BlockRows);
-            ValidateStagedSyncGroupManifest(stagingDir, outDir, bundle);
-            ValidateStagedSyncMetadata(stagingDir, outDir);
+            ValidateExpectedPublicationArtifacts(stagingDir, expectedModel);
             lease.ExpectedFiles = expectedFiles
                 .Select(relativePath => CreateCloneWorkspaceFileRecord(
                     stagingDir,
@@ -17172,59 +17220,44 @@ namespace OpennessLLM
             ValidateSealedSyncStaging(stagingDir, lease);
         }
 
-        private static SyncStagingLease SealExistingPublicationStaging(string stagingDir)
+        private static void SealExistingPublicationStaging(
+            string stagingDir,
+            CloneCheckBundleEvidence authoritativeBundle,
+            PublicationExpectedModel expectedModel,
+            SyncStagingLease lease)
         {
-            SyncStagingLease lease = new SyncStagingLease { DirectoryPath = stagingDir };
-            try
+            if (authoritativeBundle == null || expectedModel == null || lease == null)
             {
-                EnsureExistingTreeHasNoReparsePoints(stagingDir, "apply publication staging");
-                List<string> files = new List<string>();
-                foreach (string rootName in new[] { "_root", "_metadata" })
-                {
-                    string root = Path.Combine(stagingDir, rootName);
-                    if (!Directory.Exists(root)) throw new InvalidDataException("Apply publication staging is missing " + rootName + ".");
-                    files.AddRange(Directory.GetFiles(root, "*", SearchOption.AllDirectories)
-                        .Select(path => NormalizeCloneWorkspaceRelativePath(MakeRelativePath(stagingDir, path))));
-                }
-                foreach (string manifest in new[] { "plc-blocks.csv", "block-groups.csv" })
-                {
-                    string path = Path.Combine(stagingDir, manifest);
-                    if (!File.Exists(path)) throw new InvalidDataException("Apply publication staging is missing " + manifest + ".");
-                    files.Add(manifest);
-                }
-                HashSet<string> expectedFiles = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-                HashSet<string> expectedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string rootName in new[] { "_root", "_metadata" })
-                {
-                    expectedDirectories.Add(rootName);
-                    expectedDirectories.UnionWith(Directory.GetDirectories(Path.Combine(stagingDir, rootName), "*", SearchOption.AllDirectories)
-                        .Select(path => NormalizeCloneWorkspaceRelativePath(MakeRelativePath(stagingDir, path))));
-                }
-                ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
-                foreach (string relativePath in expectedFiles.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-                {
-                    lease.HoldReadLock(Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-                }
-                ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
-                lease.ExpectedFiles = expectedFiles.Select(relativePath => CreateCloneWorkspaceFileRecord(
-                        stagingDir,
-                        Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)),
-                        "publication"))
-                    .OrderBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                lease.ExpectedDirectories = expectedDirectories.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
-                lease.PackagePath = Path.Combine(stagingDir, SyncPublicationPackageFileName);
-                CreateSyncPublicationPackage(stagingDir, lease);
-                lease.PackageSha256 = ComputeFileSha256(lease.PackagePath);
-                lease.HoldReadLock(lease.PackagePath);
-                ValidateSealedSyncStaging(stagingDir, lease);
-                return lease;
+                throw new InvalidDataException("Apply publication seal requires immutable authoritative evidence.");
             }
-            catch
+            HashSet<string> expectedFiles = new HashSet<string>(expectedModel.ExpectedFiles, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> expectedDirectories = new HashSet<string>(expectedModel.ExpectedDirectories, StringComparer.OrdinalIgnoreCase);
+            ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
+            foreach (string relativePath in expectedFiles.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
             {
-                lease.Dispose();
-                throw;
+                lease.HoldReadLock(Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)));
             }
+            ValidateExactSyncPublishTree(stagingDir, expectedFiles, expectedDirectories);
+            ValidateStagedSyncSourcesAndSidecars(
+                Path.Combine(stagingDir, "_root"),
+                expectedModel.EvidenceRootDir,
+                expectedModel.CompareRootDir,
+                authoritativeBundle.BlockRows,
+                authoritativeBundle.WorkspaceRows);
+            ValidateExpectedPublicationArtifacts(stagingDir, expectedModel);
+            lease.ExpectedFiles = expectedFiles.Select(relativePath => CreateCloneWorkspaceFileRecord(
+                    stagingDir,
+                    Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)),
+                    "publication"))
+                .OrderBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            lease.ExpectedDirectories = expectedDirectories.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            lease.PackagePath = Path.Combine(stagingDir, SyncPublicationPackageFileName);
+            CreateSyncPublicationPackage(stagingDir, lease);
+            lease.PackageSha256 = ComputeFileSha256(lease.PackagePath);
+            lease.HoldReadLock(lease.PackagePath);
+            ValidateSyncPublicationPackage(lease.PackagePath, lease.PackageSha256, lease.ExpectedFiles, lease.ExpectedDirectories);
+            ValidateSealedSyncStaging(stagingDir, lease);
         }
 
         private static HashSet<string> BuildExpectedSyncPublishFiles(
@@ -17445,7 +17478,7 @@ namespace OpennessLLM
             ValidateSyncPublicationPackage(lease.PackagePath, lease.PackageSha256, lease.ExpectedFiles, lease.ExpectedDirectories);
         }
 
-        private static void CommitStagedSyncWorkspace(
+        private static PublicationCommitResult CommitStagedSyncWorkspace(
             string outDir,
             string stagingDir,
             string backupDir,
@@ -17455,6 +17488,21 @@ namespace OpennessLLM
             Action<string> crashHook)
         {
             RecoverIncompletePublication(outDir);
+            outDir = Path.GetFullPath(outDir);
+            stagingDir = Path.GetFullPath(stagingDir);
+            backupDir = Path.GetFullPath(backupDir);
+            packagePath = Path.GetFullPath(packagePath);
+            if (!EqualsIgnoreCase(operation, "sync-clone") && !EqualsIgnoreCase(operation, "apply-publication"))
+            {
+                throw new InvalidDataException("Unsupported clone publication operation: " + operation);
+            }
+            EnsurePathInside(stagingDir, EqualsIgnoreCase(operation, "sync-clone") ? Path.Combine(outDir, "_sync-staging") : Path.Combine(outDir, "_apply-validation"));
+            EnsurePathInside(backupDir, EqualsIgnoreCase(operation, "sync-clone") ? Path.Combine(outDir, "_sync-backups") : Path.Combine(outDir, "_apply-backups"));
+            EnsurePathInside(packagePath, stagingDir);
+            if (!File.Exists(packagePath) || !EqualsIgnoreCase(ComputeFileSha256(packagePath), expectedPackageSha256))
+            {
+                throw new InvalidDataException("Publication package does not match the sealed package digest.");
+            }
             ValidateSyncPublicationPackage(packagePath, expectedPackageSha256, ReadPackageFileInventory(packagePath), ReadPackageDirectories(packagePath));
             string journalPath = Path.Combine(outDir, PublicationTransactionFileName);
             string finalRoot = Path.Combine(outDir, "_root");
@@ -17475,15 +17523,36 @@ namespace OpennessLLM
             string backupGroups = Path.Combine(backupDir, "block-groups.csv");
             string backupMetadata = Path.Combine(backupDir, "_metadata");
             string backupMarker = Path.Combine(backupDir, CloneCheckBundleFileName);
+            ValidatePublicationOldStateInvariant(
+                operation,
+                Directory.Exists(finalRoot),
+                File.Exists(finalBlocks),
+                File.Exists(finalGroups),
+                Directory.Exists(finalMetadata),
+                File.Exists(finalMarker));
+            string transactionId = Guid.NewGuid().ToString("N");
+            string stagingOwnerSha256 = BindPublicationStagingOwner(
+                stagingDir,
+                operation,
+                outDir,
+                transactionId,
+                expectedPackageSha256);
+            string completionResultPath = Path.Combine(backupDir, "publication-completion.json");
             Dictionary<string, string> journal = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                { "transactionId", Guid.NewGuid().ToString("N") },
+                { "owner", ProductName },
+                { "journalSchemaVersion", PublicationJournalSchemaVersion },
+                { "workspacePath", outDir },
+                { "transactionId", transactionId },
                 { "operation", EmptyIfNull(operation) },
                 { "state", "prepared" },
-                { "stagingDir", Path.GetFullPath(stagingDir) },
-                { "backupDir", Path.GetFullPath(backupDir) },
-                { "packagePath", Path.GetFullPath(packagePath) },
+                { "updatedUtc", string.Empty },
+                { "stagingDir", stagingDir },
+                { "backupDir", backupDir },
+                { "packagePath", packagePath },
                 { "packageSha256", expectedPackageSha256 },
+                { "stagingOwnerSha256", stagingOwnerSha256 },
+                { "completionResultPath", completionResultPath },
                 { "oldRootExists", Directory.Exists(finalRoot).ToString() },
                 { "oldRootSha256", PublicationPathFingerprint(finalRoot, true) },
                 { "oldBlocksExists", File.Exists(finalBlocks).ToString() },
@@ -17499,8 +17568,14 @@ namespace OpennessLLM
                 { "newGroupsSha256", PackageFileFingerprint(packagePath, "block-groups.csv") },
                 { "newMetadataSha256", PackageComponentFingerprint(packagePath, "_metadata") }
             };
-            WritePublicationJournal(journalPath, journal, "prepared");
+            PublicationCommitResult commitResult = PublicationCommitResultFromJournal(journal);
             Directory.CreateDirectory(backupDir);
+            WritePublicationCompletionResult(
+                journal,
+                "not_committed",
+                "pending",
+                "Publication transaction is prepared; no commit has been recorded.");
+            WritePublicationJournal(journalPath, journal, "prepared");
             try
             {
                 MovePublicationComponentWithJournal(finalRoot, backupRoot, true, journalPath, journal, "root-backed-up", crashHook);
@@ -17528,13 +17603,29 @@ namespace OpennessLLM
 
                 ValidateInstalledPublication(outDir, journal);
                 WritePublicationJournal(journalPath, journal, "committed");
-                File.Delete(journalPath);
+                try
+                {
+                    WritePublicationCompletionResult(journal, "committed", "pending", "Publication committed; optional diagnostics have not completed yet.");
+                    File.Delete(journalPath);
+                }
+                catch (Exception diagnosticException)
+                {
+                    throw new PublicationCommittedDiagnosticException(
+                        "Clone publication committed; recovery is not required, but durable completion diagnostics could not be finalized. Journal: " + journalPath,
+                        commitResult,
+                        diagnosticException);
+                }
+                return commitResult;
             }
             catch (PublicationCrashSimulationException)
             {
                 // Self-tests use this exception to model abrupt process death:
                 // no in-memory rollback is allowed and the durable journal must
                 // be sufficient for the next invocation.
+                throw;
+            }
+            catch (PublicationCommittedDiagnosticException)
+            {
                 throw;
             }
             catch (Exception ex)
@@ -17572,6 +17663,211 @@ namespace OpennessLLM
             if (exists) InvokePublicationCrashHook(crashHook, completedState);
         }
 
+        private static void WritePublicationStagingOwnerMarker(string markerPath, string purpose, string checkRunId)
+        {
+            WriteFlatJsonObjectAtomically(
+                markerPath,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "owner", ProductName },
+                    { "markerSchemaVersion", PublicationOwnerMarkerSchemaVersion },
+                    { "purpose", EmptyIfNull(purpose) },
+                    { "checkRunId", EmptyIfNull(checkRunId) }
+                });
+            FlushFileToDisk(markerPath);
+        }
+
+        private static string PublicationStagingOwnerMarkerPath(string stagingDir, string operation)
+        {
+            return Path.Combine(
+                stagingDir,
+                EqualsIgnoreCase(operation, "sync-clone")
+                    ? SyncStagingOwnerMarkerFileName
+                    : ApplyValidationOwnerMarkerFileName);
+        }
+
+        private static string BindPublicationStagingOwner(
+            string stagingDir,
+            string operation,
+            string workspacePath,
+            string transactionId,
+            string packageSha256)
+        {
+            string markerPath = PublicationStagingOwnerMarkerPath(stagingDir, operation);
+            if (!File.Exists(markerPath)) throw new InvalidDataException("Publication staging owner marker is missing: " + markerPath);
+            Dictionary<string, string> marker = ParseStrictFlatJsonObject(File.ReadAllText(markerPath, Encoding.UTF8), markerPath);
+            ValidateExactFlatObjectKeys(marker, new[] { "owner", "markerSchemaVersion", "purpose", "checkRunId" }, "unbound publication staging owner marker");
+            if (!EqualsIgnoreCase(SidecarValue(marker, "owner"), ProductName)
+                || !EqualsIgnoreCase(SidecarValue(marker, "markerSchemaVersion"), PublicationOwnerMarkerSchemaVersion)
+                || !EqualsIgnoreCase(SidecarValue(marker, "purpose"), operation))
+            {
+                throw new InvalidDataException("Publication staging owner marker does not match the requested operation: " + markerPath);
+            }
+            Dictionary<string, string> bound = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "owner", ProductName },
+                { "markerSchemaVersion", PublicationOwnerMarkerSchemaVersion },
+                { "purpose", operation },
+                { "checkRunId", SidecarValue(marker, "checkRunId") },
+                { "state", "transaction-bound" },
+                { "workspacePath", Path.GetFullPath(workspacePath) },
+                { "transactionId", transactionId },
+                { "packageSha256", packageSha256 }
+            };
+            WriteFlatJsonObjectAtomically(markerPath, bound);
+            FlushFileToDisk(markerPath);
+            return ComputeFileSha256(markerPath);
+        }
+
+        private static void ValidatePublicationStagingOwner(
+            string stagingDir,
+            string operation,
+            string workspacePath,
+            string transactionId,
+            string packageSha256,
+            string expectedMarkerSha256)
+        {
+            string markerPath = PublicationStagingOwnerMarkerPath(stagingDir, operation);
+            if (!File.Exists(markerPath) || !EqualsIgnoreCase(ComputeFileSha256(markerPath), expectedMarkerSha256))
+            {
+                throw new InvalidDataException("Publication staging owner marker is missing or does not match the journal transaction.");
+            }
+            Dictionary<string, string> marker = ParseStrictFlatJsonObject(File.ReadAllText(markerPath, Encoding.UTF8), markerPath);
+            ValidateExactFlatObjectKeys(
+                marker,
+                new[] { "owner", "markerSchemaVersion", "purpose", "checkRunId", "state", "workspacePath", "transactionId", "packageSha256" },
+                "bound publication staging owner marker");
+            if (!EqualsIgnoreCase(SidecarValue(marker, "owner"), ProductName)
+                || !EqualsIgnoreCase(SidecarValue(marker, "markerSchemaVersion"), PublicationOwnerMarkerSchemaVersion)
+                || !EqualsIgnoreCase(SidecarValue(marker, "purpose"), operation)
+                || !EqualsIgnoreCase(SidecarValue(marker, "state"), "transaction-bound")
+                || !EqualsIgnoreCase(Path.GetFullPath(SidecarValue(marker, "workspacePath")), Path.GetFullPath(workspacePath))
+                || !EqualsIgnoreCase(SidecarValue(marker, "transactionId"), transactionId)
+                || !EqualsIgnoreCase(SidecarValue(marker, "packageSha256"), packageSha256))
+            {
+                throw new InvalidDataException("Publication staging owner marker contradicts the transaction journal.");
+            }
+        }
+
+        private static void ValidateExactFlatObjectKeys(Dictionary<string, string> values, IEnumerable<string> keys, string label)
+        {
+            HashSet<string> expected = new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
+            if (values == null || values.Count != expected.Count || values.Keys.Any(key => !expected.Contains(key)))
+            {
+                throw new InvalidDataException(label + " has an unexpected or missing property.");
+            }
+        }
+
+        private static void ValidatePublicationOldStateInvariant(
+            string operation,
+            bool rootExists,
+            bool blocksExists,
+            bool groupsExists,
+            bool metadataExists,
+            bool markerExists)
+        {
+            if (!rootExists || !blocksExists || !groupsExists || !metadataExists)
+            {
+                throw new InvalidDataException(operation + " requires an existing _root, block/group manifests, and metadata before publication.");
+            }
+            if (EqualsIgnoreCase(operation, "sync-clone") && !markerExists)
+            {
+                throw new InvalidDataException("sync-clone requires the authoritative marker that it is about to consume.");
+            }
+            if (EqualsIgnoreCase(operation, "apply-publication") && markerExists)
+            {
+                throw new InvalidDataException("apply publication requires the pre-write authorization marker to remain revoked.");
+            }
+        }
+
+        private static PublicationCommitResult PublicationCommitResultFromJournal(Dictionary<string, string> journal)
+        {
+            return new PublicationCommitResult
+            {
+                TransactionId = SidecarValue(journal, "transactionId"),
+                Operation = SidecarValue(journal, "operation"),
+                WorkspacePath = SidecarValue(journal, "workspacePath"),
+                BackupDir = SidecarValue(journal, "backupDir"),
+                CompletionResultPath = SidecarValue(journal, "completionResultPath")
+            };
+        }
+
+        private static void WritePublicationCompletionResult(
+            Dictionary<string, string> journal,
+            string state,
+            string diagnosticStatus,
+            string message)
+        {
+            PublicationCommitResult result = PublicationCommitResultFromJournal(journal);
+            UpdatePublicationCompletionResult(result, state, diagnosticStatus, message);
+        }
+
+        private static void UpdatePublicationCompletionResult(
+            PublicationCommitResult result,
+            string state,
+            string diagnosticStatus,
+            string message)
+        {
+            if (result == null || string.IsNullOrWhiteSpace(result.CompletionResultPath)) return;
+            EnsurePathInside(result.CompletionResultPath, result.BackupDir);
+            Directory.CreateDirectory(result.BackupDir);
+            WriteFlatJsonObjectAtomically(
+                result.CompletionResultPath,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "owner", ProductName },
+                    { "resultSchemaVersion", PublicationResultSchemaVersion },
+                    { "transactionId", result.TransactionId },
+                    { "operation", result.Operation },
+                    { "state", state },
+                    { "workspacePath", result.WorkspacePath },
+                    { "backupDir", result.BackupDir },
+                    { "diagnosticStatus", diagnosticStatus },
+                    { "message", EmptyIfNull(message) },
+                    { "updatedUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) }
+                });
+            FlushFileToDisk(result.CompletionResultPath);
+        }
+
+        private static void UpdatePublicationCompletionResultBestEffort(
+            PublicationCommitResult result,
+            string state,
+            string diagnosticStatus,
+            string message)
+        {
+            try
+            {
+                UpdatePublicationCompletionResult(result, state, diagnosticStatus, message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("WARNING: durable publication completion state remains committed, but its diagnostic update failed: " + ex.Message);
+            }
+        }
+
+        private static bool TryWriteCommittedPublicationDiagnostics(
+            PublicationCommitResult result,
+            string operationLabel,
+            Action writer,
+            out Exception failure)
+        {
+            failure = null;
+            try
+            {
+                writer();
+                UpdatePublicationCompletionResult(result, "committed", "ok", operationLabel + " final reports were published.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+                UpdatePublicationCompletionResultBestEffort(result, "committed_with_diagnostic_failure", "failed", ex.GetType().Name + ": " + ex.Message);
+                Console.WriteLine("WARNING: " + operationLabel + " committed successfully; recovery is not required, but final report publication failed: " + ex.Message);
+                if (result != null) Console.WriteLine("Durable completion result: " + result.CompletionResultPath);
+                return false;
+            }
+        }
+
         private static void InvokePublicationCrashHook(Action<string> crashHook, string phase)
         {
             if (crashHook == null) return;
@@ -17594,10 +17890,46 @@ namespace OpennessLLM
             Dictionary<string, string> journal,
             string state)
         {
+            if (!PublicationJournalStates().Contains(state, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("Publication transaction journal state is not allowed: " + state);
+            }
             journal["state"] = state;
             journal["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            ValidateExactFlatObjectKeys(journal, PublicationJournalKeys(), "publication transaction journal");
             WriteFlatJsonObjectAtomically(journalPath, journal);
             FlushFileToDisk(journalPath);
+        }
+
+        private static string[] PublicationJournalKeys()
+        {
+            return new[]
+            {
+                "owner", "journalSchemaVersion", "workspacePath", "transactionId", "operation", "state", "updatedUtc",
+                "stagingDir", "backupDir", "packagePath", "packageSha256", "stagingOwnerSha256", "completionResultPath",
+                "oldRootExists", "oldRootSha256", "oldBlocksExists", "oldBlocksSha256",
+                "oldGroupsExists", "oldGroupsSha256", "oldMetadataExists", "oldMetadataSha256",
+                "oldMarkerExists", "oldMarkerSha256", "newRootSha256", "newBlocksSha256",
+                "newGroupsSha256", "newMetadataSha256"
+            };
+        }
+
+        private static string[] PublicationJournalStates()
+        {
+            return new[]
+            {
+                "prepared",
+                "before-root-backed-up", "root-backed-up",
+                "before-blocks-backed-up", "blocks-backed-up",
+                "before-groups-backed-up", "groups-backed-up",
+                "before-metadata-backed-up", "metadata-backed-up",
+                "before-marker-backed-up", "marker-backed-up",
+                "before-root-installed", "root-installed",
+                "before-blocks-installed", "blocks-installed",
+                "before-groups-installed", "groups-installed",
+                "before-metadata-installed", "metadata-installed",
+                "committed", "rolled-back"
+            };
         }
 
         private static string PublicationPathFingerprint(string path, bool directory)
@@ -17712,26 +18044,31 @@ namespace OpennessLLM
             }
         }
 
-        private static void RecoverIncompletePublication(string outDir)
+        private static void ValidatePublicationJournalContract(
+            string outDir,
+            Dictionary<string, string> journal,
+            string journalPath)
         {
-            RecoverIncompletePublication(outDir, false);
-        }
-
-        private static void RecoverIncompletePublication(string outDir, bool cleanupRecoveredStaging)
-        {
-            string journalPath = Path.Combine(outDir, PublicationTransactionFileName);
-            if (!File.Exists(journalPath)) return;
-            Dictionary<string, string> journal = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
+            ValidateExactFlatObjectKeys(journal, PublicationJournalKeys(), "publication transaction journal");
             string transactionId = RequiredCloneCheckMarkerValue(journal, "transactionId", journalPath);
             string operation = RequiredCloneCheckMarkerValue(journal, "operation", journalPath);
             string state = RequiredCloneCheckMarkerValue(journal, "state", journalPath);
+            string workspacePath = Path.GetFullPath(RequiredCloneCheckMarkerValue(journal, "workspacePath", journalPath));
             string stagingDir = Path.GetFullPath(RequiredCloneCheckMarkerValue(journal, "stagingDir", journalPath));
             string backupDir = Path.GetFullPath(RequiredCloneCheckMarkerValue(journal, "backupDir", journalPath));
             string packagePath = Path.GetFullPath(RequiredCloneCheckMarkerValue(journal, "packagePath", journalPath));
-            if (!Regex.IsMatch(transactionId, "^[0-9a-fA-F]{32}$")
-                || (!EqualsIgnoreCase(operation, "sync-clone") && !EqualsIgnoreCase(operation, "apply-publication")))
+            string packageSha256 = RequiredCloneCheckMarkerValue(journal, "packageSha256", journalPath);
+            string completionResultPath = Path.GetFullPath(RequiredCloneCheckMarkerValue(journal, "completionResultPath", journalPath));
+            DateTime updatedUtc;
+            if (!EqualsIgnoreCase(SidecarValue(journal, "owner"), ProductName)
+                || !EqualsIgnoreCase(SidecarValue(journal, "journalSchemaVersion"), PublicationJournalSchemaVersion)
+                || !EqualsIgnoreCase(workspacePath, Path.GetFullPath(outDir))
+                || !Regex.IsMatch(transactionId, "^[0-9a-fA-F]{32}$")
+                || (!EqualsIgnoreCase(operation, "sync-clone") && !EqualsIgnoreCase(operation, "apply-publication"))
+                || !PublicationJournalStates().Contains(state, StringComparer.OrdinalIgnoreCase)
+                || !DateTime.TryParse(SidecarValue(journal, "updatedUtc"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out updatedUtc))
             {
-                throw new InvalidDataException("Publication transaction journal has invalid identity fields: " + journalPath);
+                throw new InvalidDataException("Publication transaction journal has invalid owner/schema/workspace/identity/state fields: " + journalPath);
             }
             string stagingParent = EqualsIgnoreCase(operation, "sync-clone")
                 ? Path.Combine(outDir, "_sync-staging")
@@ -17742,38 +18079,180 @@ namespace OpennessLLM
             EnsurePathInside(stagingDir, stagingParent);
             EnsurePathInside(packagePath, stagingDir);
             EnsurePathInside(backupDir, backupParent);
+            EnsurePathInside(completionResultPath, backupDir);
+            EnsureExistingTreeHasNoReparsePoints(stagingDir, "publication recovery staging");
+            if (Directory.Exists(backupDir)) EnsureExistingTreeHasNoReparsePoints(backupDir, "publication recovery backup");
+            if (!File.Exists(packagePath) || !EqualsIgnoreCase(ComputeFileSha256(packagePath), packageSha256))
+            {
+                throw new InvalidDataException("Publication transaction package is missing or does not match the journal digest; manual recovery is required.");
+            }
+            if (!EqualsIgnoreCase(PackageComponentFingerprint(packagePath, "_root"), SidecarValue(journal, "newRootSha256"))
+                || !EqualsIgnoreCase(PackageFileFingerprint(packagePath, "plc-blocks.csv"), SidecarValue(journal, "newBlocksSha256"))
+                || !EqualsIgnoreCase(PackageFileFingerprint(packagePath, "block-groups.csv"), SidecarValue(journal, "newGroupsSha256"))
+                || !EqualsIgnoreCase(PackageComponentFingerprint(packagePath, "_metadata"), SidecarValue(journal, "newMetadataSha256")))
+            {
+                throw new InvalidDataException("Publication transaction new-state fingerprints do not match the bound package.");
+            }
+            ValidatePublicationStagingOwner(
+                stagingDir,
+                operation,
+                outDir,
+                transactionId,
+                packageSha256,
+                RequiredCloneCheckMarkerValue(journal, "stagingOwnerSha256", journalPath));
+
+            bool oldRoot = ParsePublicationJournalExists(journal, "oldRoot", journalPath);
+            bool oldBlocks = ParsePublicationJournalExists(journal, "oldBlocks", journalPath);
+            bool oldGroups = ParsePublicationJournalExists(journal, "oldGroups", journalPath);
+            bool oldMetadata = ParsePublicationJournalExists(journal, "oldMetadata", journalPath);
+            bool oldMarker = ParsePublicationJournalExists(journal, "oldMarker", journalPath);
+            ValidatePublicationOldStateInvariant(operation, oldRoot, oldBlocks, oldGroups, oldMetadata, oldMarker);
+        }
+
+        private static bool ParsePublicationJournalExists(
+            Dictionary<string, string> journal,
+            string keyPrefix,
+            string journalPath)
+        {
+            bool exists;
+            if (!bool.TryParse(RequiredCloneCheckMarkerValue(journal, keyPrefix + "Exists", journalPath), out exists))
+            {
+                throw new InvalidDataException("Publication journal has invalid " + keyPrefix + "Exists.");
+            }
+            string hash = SidecarValue(journal, keyPrefix + "Sha256");
+            if (exists == string.IsNullOrWhiteSpace(hash))
+            {
+                throw new InvalidDataException("Publication journal has an inconsistent " + keyPrefix + " existence/fingerprint pair.");
+            }
+            return exists;
+        }
+
+        private static void RecoverIncompletePublication(string outDir)
+        {
+            RecoverIncompletePublication(outDir, false);
+        }
+
+        private static void RecoverIncompletePublication(string outDir, bool cleanupRecoveredStaging)
+        {
+            outDir = Path.GetFullPath(outDir);
+            string journalPath = Path.Combine(outDir, PublicationTransactionFileName);
+            if (!File.Exists(journalPath)) return;
+            Dictionary<string, string> journal = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
+            ValidatePublicationJournalContract(outDir, journal, journalPath);
+            string transactionId = SidecarValue(journal, "transactionId");
+            string operation = SidecarValue(journal, "operation");
+            string state = SidecarValue(journal, "state");
+            string stagingDir = Path.GetFullPath(SidecarValue(journal, "stagingDir"));
+            string backupDir = Path.GetFullPath(SidecarValue(journal, "backupDir"));
 
             if (EqualsIgnoreCase(state, "committed"))
             {
                 try
                 {
                     ValidateInstalledPublication(outDir, journal);
+                    WritePublicationCompletionResult(journal, "committed", "recovered", "Committed publication was verified after process restart.");
                     File.Delete(journalPath);
                     if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
                     return;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // A committed marker with mismatched installed bytes is not
-                    // accepted; fall through to deterministic old-state restore.
+                    throw new InvalidOperationException(
+                        "Publication journal records a committed transaction, but installed-state or completion-result verification failed. Recovery is not required and no workspace component was changed; inspect " + journalPath + ".",
+                        ex);
                 }
             }
 
-            RestorePublicationComponent(outDir, backupDir, "_root", true, journal, "oldRoot");
-            RestorePublicationComponent(outDir, backupDir, "plc-blocks.csv", false, journal, "oldBlocks");
-            RestorePublicationComponent(outDir, backupDir, "block-groups.csv", false, journal, "oldGroups");
-            RestorePublicationComponent(outDir, backupDir, "_metadata", true, journal, "oldMetadata");
-            RestorePublicationComponent(outDir, backupDir, CloneCheckBundleFileName, false, journal, "oldMarker");
+            ValidatePublicationRecoveryComponent(outDir, backupDir, "_root", true, journal, "oldRoot", "newRootSha256");
+            ValidatePublicationRecoveryComponent(outDir, backupDir, "plc-blocks.csv", false, journal, "oldBlocks", "newBlocksSha256");
+            ValidatePublicationRecoveryComponent(outDir, backupDir, "block-groups.csv", false, journal, "oldGroups", "newGroupsSha256");
+            ValidatePublicationRecoveryComponent(outDir, backupDir, "_metadata", true, journal, "oldMetadata", "newMetadataSha256");
+            ValidatePublicationRecoveryComponent(outDir, backupDir, CloneCheckBundleFileName, false, journal, "oldMarker", string.Empty);
+
+            RestorePublicationComponent(outDir, backupDir, "_root", true, journal, "oldRoot", "newRootSha256");
+            RestorePublicationComponent(outDir, backupDir, "plc-blocks.csv", false, journal, "oldBlocks", "newBlocksSha256");
+            RestorePublicationComponent(outDir, backupDir, "block-groups.csv", false, journal, "oldGroups", "newGroupsSha256");
+            RestorePublicationComponent(outDir, backupDir, "_metadata", true, journal, "oldMetadata", "newMetadataSha256");
+            RestorePublicationComponent(outDir, backupDir, CloneCheckBundleFileName, false, journal, "oldMarker", string.Empty);
             if (EqualsIgnoreCase(operation, "apply-publication"))
             {
                 // The TIA project may already have been saved before a local
                 // publication crash. Never resurrect its pre-apply authorization.
                 InvalidateCloneCheckBundle(outDir);
             }
+            try
+            {
+                WritePublicationCompletionResult(
+                    journal,
+                    "not_committed",
+                    "rolled_back",
+                    "Interrupted publication was recovered by restoring the recorded previous baseline.");
+            }
+            catch (Exception completionException)
+            {
+                Console.WriteLine("WARNING: publication rollback completed, but its not_committed diagnostic could not be updated: " + completionException.Message);
+            }
             WritePublicationJournal(journalPath, journal, "rolled-back");
             File.Delete(journalPath);
             Console.WriteLine("Recovered incomplete " + operation + " transaction " + transactionId + " by restoring the previous clone baseline.");
             if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
+        }
+
+        private static void ValidatePublicationRecoveryComponent(
+            string outDir,
+            string backupDir,
+            string name,
+            bool directory,
+            Dictionary<string, string> journal,
+            string keyPrefix,
+            string newHashKey)
+        {
+            string finalPath = Path.Combine(outDir, name);
+            string backupPath = Path.Combine(backupDir, name);
+            bool oldExists = ParsePublicationJournalExists(journal, keyPrefix, PublicationTransactionFileName);
+            string expectedOldHash = SidecarValue(journal, keyPrefix + "Sha256");
+            string expectedNewHash = string.IsNullOrWhiteSpace(newHashKey) ? string.Empty : SidecarValue(journal, newHashKey);
+            bool backupExists = directory ? Directory.Exists(backupPath) : File.Exists(backupPath);
+            bool finalExists = directory ? Directory.Exists(finalPath) : File.Exists(finalPath);
+            if ((File.Exists(backupPath) || Directory.Exists(backupPath)) && !backupExists)
+            {
+                throw new InvalidDataException("Publication backup component has the wrong filesystem type: " + backupPath);
+            }
+            if ((File.Exists(finalPath) || Directory.Exists(finalPath)) && !finalExists)
+            {
+                throw new InvalidDataException("Active publication component has the wrong filesystem type: " + finalPath);
+            }
+            if (backupExists)
+            {
+                if (!oldExists || !EqualsIgnoreCase(PublicationPathFingerprint(backupPath, directory), expectedOldHash))
+                {
+                    throw new InvalidDataException("Publication backup does not match durable old-state evidence: " + backupPath);
+                }
+                if (finalExists)
+                {
+                    string finalHash = PublicationPathFingerprint(finalPath, directory);
+                    if (!EqualsIgnoreCase(finalHash, expectedOldHash)
+                        && (string.IsNullOrWhiteSpace(expectedNewHash) || !EqualsIgnoreCase(finalHash, expectedNewHash)))
+                    {
+                        throw new InvalidDataException("Active publication component matches neither recorded old nor transaction-installed new state; no recovery mutation was performed: " + finalPath);
+                    }
+                }
+                return;
+            }
+            if (oldExists)
+            {
+                if (!finalExists || !EqualsIgnoreCase(PublicationPathFingerprint(finalPath, directory), expectedOldHash))
+                {
+                    throw new InvalidDataException("Neither final nor backup component matches durable old-state evidence; no recovery mutation was performed: " + finalPath);
+                }
+                return;
+            }
+            if (finalExists
+                && (string.IsNullOrWhiteSpace(expectedNewHash)
+                    || !EqualsIgnoreCase(PublicationPathFingerprint(finalPath, directory), expectedNewHash)))
+            {
+                throw new InvalidDataException("Journal cannot prove that the active component was installed by this transaction; no recovery mutation was performed: " + finalPath);
+            }
         }
 
         private static void CleanupRecoveredPublicationStaging(string operation, string stagingDir)
@@ -17793,7 +18272,8 @@ namespace OpennessLLM
             string name,
             bool directory,
             Dictionary<string, string> journal,
-            string keyPrefix)
+            string keyPrefix,
+            string newHashKey)
         {
             string finalPath = Path.Combine(outDir, name);
             string backupPath = Path.Combine(backupDir, name);
@@ -17803,15 +18283,33 @@ namespace OpennessLLM
                 throw new InvalidDataException("Publication journal has invalid " + keyPrefix + "Exists.");
             }
             string expectedOldHash = MarkerValue(journal, keyPrefix + "Sha256");
+            string expectedNewHash = string.IsNullOrWhiteSpace(newHashKey) ? string.Empty : MarkerValue(journal, newHashKey);
             bool backupExists = directory ? Directory.Exists(backupPath) : File.Exists(backupPath);
             bool finalExists = directory ? Directory.Exists(finalPath) : File.Exists(finalPath);
+            if ((File.Exists(backupPath) || Directory.Exists(backupPath)) && !backupExists)
+            {
+                throw new InvalidDataException("Publication backup component has the wrong filesystem type: " + backupPath);
+            }
+            if ((File.Exists(finalPath) || Directory.Exists(finalPath)) && !finalExists)
+            {
+                throw new InvalidDataException("Active publication component has the wrong filesystem type: " + finalPath);
+            }
             if (backupExists)
             {
                 if (!oldExists || !EqualsIgnoreCase(PublicationPathFingerprint(backupPath, directory), expectedOldHash))
                 {
                     throw new InvalidDataException("Publication backup does not match durable old-state evidence: " + backupPath);
                 }
-                DeletePublicationPath(finalPath, directory);
+                if (finalExists)
+                {
+                    string finalHash = PublicationPathFingerprint(finalPath, directory);
+                    if (EqualsIgnoreCase(finalHash, expectedOldHash)) return;
+                    if (string.IsNullOrWhiteSpace(expectedNewHash) || !EqualsIgnoreCase(finalHash, expectedNewHash))
+                    {
+                        throw new InvalidDataException("Active publication component matches neither recorded old nor transaction-installed new state; manual recovery is required: " + finalPath);
+                    }
+                    DeletePublicationPath(finalPath, directory);
+                }
                 if (directory) Directory.Move(backupPath, finalPath); else File.Move(backupPath, finalPath);
                 return;
             }
@@ -17822,6 +18320,12 @@ namespace OpennessLLM
                     throw new InvalidDataException("Neither final nor backup component matches durable old-state evidence: " + finalPath);
                 }
                 return;
+            }
+            if (!finalExists) return;
+            if (string.IsNullOrWhiteSpace(expectedNewHash)
+                || !EqualsIgnoreCase(PublicationPathFingerprint(finalPath, directory), expectedNewHash))
+            {
+                throw new InvalidDataException("Journal cannot prove that the active component was installed by this transaction; no deletion was performed: " + finalPath);
             }
             DeletePublicationPath(finalPath, directory);
         }
@@ -18045,6 +18549,123 @@ namespace OpennessLLM
             }
         }
 
+        private static PublicationExpectedModel BuildPublicationExpectedModel(
+            string logicalOutDir,
+            CloneCheckBundleEvidence bundle,
+            string stagingDir,
+            string evidenceRootDir,
+            string compareRootDir,
+            SyncInputSet immutableInputs)
+        {
+            if (bundle == null || immutableInputs == null)
+            {
+                throw new InvalidDataException("Publication expected model requires authoritative bundle and immutable inputs.");
+            }
+
+            string finalRootDir = Path.Combine(logicalOutDir, "_root");
+            List<string[]> blockValues = BuildSyncedBlockManifestRows(
+                immutableInputs.BlockManifestPath,
+                evidenceRootDir,
+                finalRootDir,
+                compareRootDir,
+                bundle.BlockRows,
+                delegate(Dictionary<string, string> row, string evidenceDestination)
+                {
+                    string status = GetCsvValue(row, "Status");
+                    if (SyncStatusUsesCurrentSource(status))
+                    {
+                        return immutableInputs.CurrentSourcePath(GetCsvValue(row, "CurrentPath"));
+                    }
+                    return MapClonePathToAlternateRoot(
+                        evidenceDestination,
+                        evidenceRootDir,
+                        Path.Combine(immutableInputs.WorkspaceRoot, "_root"));
+                });
+            List<string[]> groupValues = BuildSyncedGroupManifestRows(
+                immutableInputs.GroupManifestPath,
+                finalRootDir,
+                bundle.GroupRows);
+            PublicationExpectedModel model = new PublicationExpectedModel
+            {
+                LogicalOutDir = Path.GetFullPath(logicalOutDir),
+                EvidenceRootDir = Path.GetFullPath(evidenceRootDir),
+                CompareRootDir = Path.GetFullPath(compareRootDir),
+                MetadataGeneratedAt = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                BlockRows = CsvValueRowsToDictionaries(BlockManifestHeaders(), blockValues),
+                GroupRows = CsvValueRowsToDictionaries(GroupManifestHeaders(), groupValues),
+                ExpectedFiles = BuildExpectedSyncPublishFiles(bundle, stagingDir, evidenceRootDir, compareRootDir)
+            };
+            model.ExpectedDirectories = BuildExpectedSyncPublishDirectories(bundle, stagingDir, model.ExpectedFiles);
+            return model;
+        }
+
+        private static void WriteExpectedPublicationArtifacts(string stagingDir, PublicationExpectedModel model)
+        {
+            WriteCsv(
+                Path.Combine(stagingDir, "plc-blocks.csv"),
+                BlockManifestHeaders(),
+                model.BlockRows.Select(row => BlockManifestHeaders().Select(header => GetCsvValue(row, header)).ToArray()));
+            WriteCsv(
+                Path.Combine(stagingDir, "block-groups.csv"),
+                GroupManifestHeaders(),
+                model.GroupRows.Select(row => GroupManifestHeaders().Select(header => GetCsvValue(row, header)).ToArray()));
+            WriteCloneMetadata(
+                stagingDir,
+                model.LogicalOutDir,
+                model.BlockRows,
+                model.GroupRows,
+                model.MetadataGeneratedAt);
+        }
+
+        private static void ValidateExpectedPublicationArtifacts(string stagingDir, PublicationExpectedModel model)
+        {
+            ValidateCsvRowsExactly(Path.Combine(stagingDir, "plc-blocks.csv"), BlockManifestHeaders(), model.BlockRows, "staged block manifest");
+            ValidateCsvRowsExactly(Path.Combine(stagingDir, "block-groups.csv"), GroupManifestHeaders(), model.GroupRows, "staged group manifest");
+            ValidateStagedSyncMetadata(stagingDir, model);
+        }
+
+        private static List<Dictionary<string, string>> CsvValueRowsToDictionaries(string[] headers, IEnumerable<string[]> values)
+        {
+            List<Dictionary<string, string>> result = new List<Dictionary<string, string>>();
+            foreach (string[] valueRow in values ?? new string[0][])
+            {
+                if (valueRow.Length != headers.Length) throw new InvalidDataException("Expected publication row has an invalid field count.");
+                Dictionary<string, string> row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < headers.Length; i++) row.Add(headers[i], EmptyIfNull(valueRow[i]));
+                result.Add(row);
+            }
+            return result;
+        }
+
+        private static void ValidateCsvRowsExactly(
+            string path,
+            string[] expectedHeaders,
+            List<Dictionary<string, string>> expectedRows,
+            string label)
+        {
+            if (!File.Exists(path)) throw new InvalidDataException(label + " is missing: " + path);
+            List<string> records = ParseCsvRecords(File.ReadAllText(path, Encoding.UTF8));
+            if (records.Count == 0) throw new InvalidDataException(label + " is empty: " + path);
+            List<string> headers = ParseCsvLine(records[0]);
+            if (headers.Count != expectedHeaders.Length
+                || headers.Where((value, index) => !string.Equals(value, expectedHeaders[index], StringComparison.Ordinal)).Any())
+            {
+                throw new InvalidDataException(label + " headers do not match the fixed publication contract.");
+            }
+            List<Dictionary<string, string>> actualRows = ReadCsv(path);
+            if (actualRows.Count != expectedRows.Count) throw new InvalidDataException(label + " row count does not match authoritative evidence.");
+            for (int i = 0; i < expectedRows.Count; i++)
+            {
+                foreach (string header in expectedHeaders)
+                {
+                    if (!string.Equals(GetCsvValue(actualRows[i], header), GetCsvValue(expectedRows[i], header), StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(label + " row " + (i + 1).ToString(CultureInfo.InvariantCulture) + " field " + header + " differs from authoritative evidence.");
+                    }
+                }
+            }
+        }
+
         private static void WriteSyncedBlockManifest(
             string manifestOutputPath,
             string originalManifestPath,
@@ -18052,6 +18673,27 @@ namespace OpennessLLM
             string contentRootDir,
             string compareRootDir,
             List<Dictionary<string, string>> blockRows)
+        {
+            List<string[]> rows = BuildSyncedBlockManifestRows(
+                originalManifestPath,
+                rootDir,
+                rootDir,
+                compareRootDir,
+                blockRows,
+                delegate(Dictionary<string, string> row, string destinationPath)
+                {
+                    return MapClonePathToAlternateRoot(destinationPath, rootDir, contentRootDir);
+                });
+            WriteCsv(manifestOutputPath, BlockManifestHeaders(), rows);
+        }
+
+        private static List<string[]> BuildSyncedBlockManifestRows(
+            string originalManifestPath,
+            string evidenceRootDir,
+            string finalRootDir,
+            string compareRootDir,
+            List<Dictionary<string, string>> blockRows,
+            Func<Dictionary<string, string>, string, string> trustedContentPath)
         {
             Dictionary<string, string> softwarePaths = LoadSoftwarePathsByIdentity(originalManifestPath);
             string defaultSoftwarePath = LoadFirstSoftwarePath(originalManifestPath);
@@ -18065,11 +18707,12 @@ namespace OpennessLLM
                     continue;
                 }
 
-                string destinationPath = DetermineSyncDestinationPath(status, GetCsvValue(row, "ClonePath"), GetCsvValue(row, "CurrentPath"), compareRootDir, rootDir);
-                if (string.IsNullOrWhiteSpace(destinationPath))
+                string evidenceDestination = DetermineSyncDestinationPath(status, GetCsvValue(row, "ClonePath"), GetCsvValue(row, "CurrentPath"), compareRootDir, evidenceRootDir);
+                if (string.IsNullOrWhiteSpace(evidenceDestination))
                 {
                     continue;
                 }
+                string destinationPath = MapClonePathToAlternateRoot(evidenceDestination, evidenceRootDir, finalRootDir);
 
                 string groupPath = RowGroupPathKey(row, "GroupPath");
                 string name = GetCsvValue(row, "Name");
@@ -18088,14 +18731,27 @@ namespace OpennessLLM
                     manifestSoftwarePath,
                     defaultSoftwarePath);
 
-                string contentPath = MapClonePathToAlternateRoot(destinationPath, rootDir, contentRootDir);
+                string contentPath = trustedContentPath(row, evidenceDestination);
+                if (string.IsNullOrWhiteSpace(contentPath) || !File.Exists(contentPath))
+                {
+                    throw new InvalidDataException("Immutable expected source content is missing for publication: " + evidenceDestination);
+                }
                 rows.Add(BuildSyncedBlockManifestRow(row, softwarePath, destinationPath, contentPath));
             }
-
-            WriteCsv(manifestOutputPath, BlockManifestHeaders(), rows);
+            return rows;
         }
 
         private static void WriteSyncedGroupManifest(string manifestOutputPath, string originalManifestPath, string rootDir, List<Dictionary<string, string>> groupRows)
+        {
+            WriteCsv(manifestOutputPath, GroupManifestHeaders(), BuildSyncedGroupManifestRows(originalManifestPath, rootDir, groupRows));
+        }
+
+        private static string[] GroupManifestHeaders()
+        {
+            return new[] { "SoftwarePath", "ParentGroupPath", "ParentGroupPathDisplay", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Directory" };
+        }
+
+        private static List<string[]> BuildSyncedGroupManifestRows(string originalManifestPath, string rootDir, List<Dictionary<string, string>> groupRows)
         {
             string softwarePath = LoadFirstSoftwarePath(originalManifestPath);
             List<string[]> rows = new List<string[]>();
@@ -18120,9 +18776,7 @@ namespace OpennessLLM
                 });
             }
 
-            WriteCsv(manifestOutputPath,
-                new[] { "SoftwarePath", "ParentGroupPath", "ParentGroupPathDisplay", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Directory" },
-                rows.OrderBy(x => x[3].Length).ThenBy(x => x[3], StringComparer.OrdinalIgnoreCase));
+            return rows.OrderBy(x => x[3].Length).ThenBy(x => x[3], StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         private static string MapClonePathToAlternateRoot(string path, string rootDir, string alternateRootDir)
@@ -18147,18 +18801,30 @@ namespace OpennessLLM
 
         private static void WriteCloneMetadata(string outputDir, string logicalOutDir, string blocksSourcePath, string groupsSourcePath)
         {
-            string metadataDir = Path.Combine(outputDir, "_metadata");
-            Directory.CreateDirectory(metadataDir);
-
-            string logicalBlocksCsv = Path.Combine(logicalOutDir, "plc-blocks.csv");
-            string logicalGroupsCsv = Path.Combine(logicalOutDir, "block-groups.csv");
-            string logicalMetadataDir = Path.Combine(logicalOutDir, "_metadata");
             List<Dictionary<string, string>> blocks = File.Exists(blocksSourcePath)
                 ? ReadCsv(blocksSourcePath)
                 : new List<Dictionary<string, string>>();
             List<Dictionary<string, string>> groups = File.Exists(groupsSourcePath)
                 ? ReadCsv(groupsSourcePath)
                 : new List<Dictionary<string, string>>();
+            WriteCloneMetadata(outputDir, logicalOutDir, blocks, groups, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+        }
+
+        private static void WriteCloneMetadata(
+            string outputDir,
+            string logicalOutDir,
+            List<Dictionary<string, string>> blocks,
+            List<Dictionary<string, string>> groups,
+            string generatedAt)
+        {
+            string metadataDir = Path.Combine(outputDir, "_metadata");
+            Directory.CreateDirectory(metadataDir);
+
+            string logicalBlocksCsv = Path.Combine(logicalOutDir, "plc-blocks.csv");
+            string logicalGroupsCsv = Path.Combine(logicalOutDir, "block-groups.csv");
+            string logicalMetadataDir = Path.Combine(logicalOutDir, "_metadata");
+            blocks = blocks ?? new List<Dictionary<string, string>>();
+            groups = groups ?? new List<Dictionary<string, string>>();
 
             File.WriteAllText(Path.Combine(metadataDir, "schema-version.txt"), "4" + Environment.NewLine, new UTF8Encoding(false));
             WriteJsonl(Path.Combine(metadataDir, "blocks.jsonl"), blocks.Select(NormalizeBlockMetadataRow));
@@ -18168,7 +18834,7 @@ namespace OpennessLLM
             {
                 writer.WriteLine("{");
                 writer.WriteLine("  \"schemaVersion\": 4,");
-                writer.WriteLine("  \"generatedAt\": " + Json(DateTime.Now.ToString("o")) + ",");
+                writer.WriteLine("  \"generatedAt\": " + Json(generatedAt) + ",");
                 writer.WriteLine("  \"cloneDirectory\": " + Json(logicalOutDir) + ",");
                 writer.WriteLine("  \"blocksCsv\": " + Json(logicalBlocksCsv) + ",");
                 writer.WriteLine("  \"groupsCsv\": " + Json(logicalGroupsCsv) + ",");
@@ -20482,6 +21148,8 @@ namespace OpennessLLM
             InventorySnapshot afterApply = null;
             string validationDir = null;
             ApplyStagingCleanupResult committedValidationCleanup = null;
+            PublicationCommitResult applyPublicationCommit = null;
+            Exception postCommitDiagnosticException = null;
             try
             {
                 afterApply = FilterInventoryBySoftwarePath(
@@ -20666,26 +21334,58 @@ namespace OpennessLLM
                         "identity stable across Save(); dirty rows=0; source blockers=0; group rows unchanged",
                         "check run=" + afterSaveBundle.CheckRunId);
 
-                    PrepareApplyValidationWorkspaceForPublish(validationDir, outDir);
-                    // Do not overwrite an editor's concurrent local change.
-                    ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
-
-                    string applyBackupDir = UniquePath(Path.Combine(
-                        outDir,
-                        "_apply-backups",
-                        "apply-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff")));
-                    using (SyncStagingLease publicationLease = SealExistingPublicationStaging(validationDir))
+                    using (SyncStagingLease publicationLease = new SyncStagingLease { DirectoryPath = validationDir })
                     {
-                        CommitStagedSyncWorkspace(
-                            outDir,
+                        SyncInputSet publicationInputs = StageImmutableSyncInputs(
                             validationDir,
-                            applyBackupDir,
-                            "apply-publication",
-                            publicationLease.PackagePath,
-                            publicationLease.PackageSha256,
+                            afterSaveBundle,
+                            validationDir,
+                            publicationLease,
                             null);
+                        PublicationExpectedModel expectedPublication = BuildPublicationExpectedModel(
+                            outDir,
+                            afterSaveBundle,
+                            validationDir,
+                            Path.Combine(validationDir, "_root"),
+                            Path.Combine(afterSaveBundle.CompareDirectory, "_root"),
+                            publicationInputs);
+                        PrepareApplyValidationWorkspaceForPublish(validationDir, expectedPublication);
+                        // Do not overwrite an editor's concurrent local change.
+                        ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
+                        SealExistingPublicationStaging(validationDir, afterSaveBundle, expectedPublication, publicationLease);
+
+                        string applyBackupDir = UniquePath(Path.Combine(
+                            outDir,
+                            "_apply-backups",
+                            "apply-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff")));
+                        try
+                        {
+                            applyPublicationCommit = CommitStagedSyncWorkspace(
+                                outDir,
+                                validationDir,
+                                applyBackupDir,
+                                "apply-publication",
+                                publicationLease.PackagePath,
+                                publicationLease.PackageSha256,
+                                null);
+                        }
+                        catch (PublicationCommittedDiagnosticException committedDiagnostic)
+                        {
+                            applyPublicationCommit = committedDiagnostic.CommitResult;
+                            postCommitDiagnosticException = committedDiagnostic;
+                            Console.WriteLine("WARNING: " + committedDiagnostic.Message);
+                        }
                     }
-                    committedValidationCleanup = CleanupApplyValidationWorkspace(validationDir);
+                    string retainedPublicationJournal = Path.Combine(outDir, PublicationTransactionFileName);
+                    committedValidationCleanup = File.Exists(retainedPublicationJournal)
+                        ? new ApplyStagingCleanupResult
+                        {
+                            Status = "retained-for-committed-journal",
+                            OriginalPath = validationDir,
+                            EvidencePath = retainedPublicationJournal,
+                            Message = "Committed journal still owns the apply publication package; a clone command must verify it before staging cleanup."
+                        }
+                        : CleanupApplyValidationWorkspace(validationDir);
                     validationDir = null;
 
                     // Publish a fresh authorization bundle only after both the
@@ -20693,7 +21393,17 @@ namespace OpennessLLM
                     CheckProjectClone(afterSave, outDir);
                     CloneCheckBundleEvidence publishedBundle = LoadAndValidateCloneCheckBundle(outDir);
                     EnsureCleanApplyVerificationBundle(publishedBundle, "published post-save");
-                    CopyApplyAfterCheckReports(outDir, afterBlockReportPath, afterSourceBlockerReportPath);
+                    UpdatePublicationCompletionResult(applyPublicationCommit, "committed", "ok", "Apply publication committed and a fresh authoritative bundle was verified.");
+                    try
+                    {
+                        CopyApplyAfterCheckReports(outDir, afterBlockReportPath, afterSourceBlockerReportPath);
+                    }
+                    catch (Exception diagnosticException)
+                    {
+                        postCommitDiagnosticException = diagnosticException;
+                        UpdatePublicationCompletionResultBestEffort(applyPublicationCommit, "committed_with_diagnostic_failure", "failed", diagnosticException.GetType().Name + ": " + diagnosticException.Message);
+                        Console.WriteLine("WARNING: apply-clone committed and was verified; recovery is not required, but an optional after-check report copy failed: " + diagnosticException.Message);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -20740,7 +21450,42 @@ namespace OpennessLLM
             applyStagingLease = null;
             ApplyStagingCleanupResult finalStagingCleanup = CleanupApplyStaging(applyStagingDir);
             AddApplyStagingCleanupGate(gates, finalStagingCleanup, savedProject, fullyAccepted);
-            WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, fullyAccepted, plan.Count), options.Apply, originalSave, savedProject, writeAttempted, true, plan, preflight, gates, operations);
+            if (applyPublicationCommit != null && fullyAccepted)
+            {
+                if (postCommitDiagnosticException == null)
+                {
+                    Exception reportException;
+                    bool reportsWritten = TryWriteCommittedPublicationDiagnostics(
+                        applyPublicationCommit,
+                        "apply-clone",
+                        delegate
+                        {
+                            WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, fullyAccepted, plan.Count), options.Apply, originalSave, savedProject, writeAttempted, true, plan, preflight, gates, operations);
+                        },
+                        out reportException);
+                    if (!reportsWritten) postCommitDiagnosticException = reportException;
+                }
+                else
+                {
+                    try
+                    {
+                        WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, fullyAccepted, plan.Count), options.Apply, originalSave, savedProject, writeAttempted, true, plan, preflight, gates, operations);
+                    }
+                    catch (Exception additionalReportException)
+                    {
+                        UpdatePublicationCompletionResultBestEffort(
+                            applyPublicationCommit,
+                            "committed_with_diagnostic_failure",
+                            "failed",
+                            additionalReportException.GetType().Name + ": " + additionalReportException.Message);
+                        Console.WriteLine("WARNING: apply-clone also failed to publish its final reports: " + additionalReportException.Message);
+                    }
+                }
+            }
+            else
+            {
+                WriteApplyCloneFinalReports(outDir, ApplyCloneState(options.Apply, true, writeAttempted, writeCompleted, fullyAccepted, plan.Count), options.Apply, originalSave, savedProject, writeAttempted, true, plan, preflight, gates, operations);
+            }
 
             if (finalizationException != null)
             {
@@ -21056,9 +21801,10 @@ namespace OpennessLLM
             try
             {
                 Directory.CreateDirectory(validationDir);
-                WriteTextFile(
+                WritePublicationStagingOwnerMarker(
                     Path.Combine(validationDir, ApplyValidationOwnerMarkerFileName),
-                    "OpennessLLM apply validation\ncheckRunId=" + EmptyIfNull(bundle.CheckRunId) + "\n");
+                    "apply-publication",
+                    bundle.CheckRunId);
                 CopyDirectory(rootDir, validationRoot, false);
 
                 foreach (string fileName in new[] { "plc-blocks.csv", "block-groups.csv" })
@@ -21449,54 +22195,22 @@ namespace OpennessLLM
             }
         }
 
-        private static void PrepareApplyValidationWorkspaceForPublish(string validationDir, string outDir)
+        private static void PrepareApplyValidationWorkspaceForPublish(
+            string validationDir,
+            PublicationExpectedModel expectedModel)
         {
-            if (string.IsNullOrWhiteSpace(validationDir))
+            if (string.IsNullOrWhiteSpace(validationDir) || expectedModel == null)
             {
-                throw new InvalidOperationException("Apply validation workspace is unavailable.");
+                throw new InvalidOperationException("Apply validation workspace or its immutable expected model is unavailable.");
             }
-
-            string validationRoot = Path.Combine(validationDir, "_root");
-            string finalRoot = Path.Combine(outDir, "_root");
-            string blocksPath = Path.Combine(validationDir, "plc-blocks.csv");
-            string groupsPath = Path.Combine(validationDir, "block-groups.csv");
-            string[] blockHeaders = BlockManifestHeaders();
-            List<Dictionary<string, string>> blockRows = ReadCsv(blocksPath);
-            foreach (Dictionary<string, string> row in blockRows)
-            {
-                string filePath = GetCsvValue(row, "FilePath");
-                if (string.IsNullOrWhiteSpace(filePath))
-                {
-                    continue;
-                }
-                EnsurePathInside(filePath, validationRoot);
-                row["FilePath"] = Path.Combine(finalRoot, MakeRelativePath(validationRoot, filePath));
-            }
-            WriteCsv(
-                blocksPath,
-                blockHeaders,
-                blockRows.Select(row => blockHeaders.Select(header => GetCsvValue(row, header)).ToArray()));
-
-            List<Dictionary<string, string>> groupRows = ReadCsv(groupsPath);
-            string[] groupHeaders = new[]
-            {
-                "SoftwarePath", "ParentGroupPath", "ParentGroupPathDisplay", "GroupPath", "GroupPathDisplay", "GroupPathKey", "Name", "Directory"
-            };
-            foreach (Dictionary<string, string> row in groupRows)
-            {
-                row["Directory"] = CloneDirectoryForBlockGroup(finalRoot, RowGroupPathKey(row, "GroupPath"));
-            }
-            WriteCsv(
-                groupsPath,
-                groupHeaders,
-                groupRows.Select(row => groupHeaders.Select(header => GetCsvValue(row, header)).ToArray()));
 
             string metadataDir = Path.Combine(validationDir, "_metadata");
             if (Directory.Exists(metadataDir))
             {
                 Directory.Delete(metadataDir, true);
             }
-            WriteCloneMetadata(validationDir, outDir, blocksPath, groupsPath);
+            WriteExpectedPublicationArtifacts(validationDir, expectedModel);
+            ValidateExpectedPublicationArtifacts(validationDir, expectedModel);
         }
 
         private static ApplyStagingCleanupResult CleanupApplyValidationWorkspace(string validationDir)
@@ -28630,7 +29344,12 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "sync-clone-transaction-failure", SelfTestSyncCloneTransactionFailure);
             RunSelfTestCase(results, outDir, "sync-clone-immutable-current-input", SelfTestSyncCloneImmutableCurrentInput);
             RunSelfTestCase(results, outDir, "sync-clone-staging-seal", SelfTestSyncCloneStagingSeal);
+            RunSelfTestCase(results, outDir, "sync-publication-authoritative-model", SelfTestSyncPublicationAuthoritativeModel);
+            RunSelfTestCase(results, outDir, "apply-publication-authoritative-model", SelfTestApplyPublicationAuthoritativeModel);
             RunSelfTestCase(results, outDir, "clone-publication-crash-recovery", SelfTestClonePublicationCrashRecovery);
+            RunSelfTestCase(results, outDir, "clone-publication-abrupt-process-kill", SelfTestClonePublicationAbruptProcessKill);
+            RunSelfTestCase(results, outDir, "clone-publication-journal-forgery", SelfTestClonePublicationJournalForgery);
+            RunSelfTestCase(results, outDir, "clone-publication-committed-report-failure", SelfTestClonePublicationCommittedReportFailure);
             RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
             RunSelfTestCase(results, outDir, "clone-check-bundle-project-binding", SelfTestCloneCheckBundleProjectBinding);
             RunSelfTestCase(results, outDir, "apply-clone-canonical-source-formatting", SelfTestApplyCloneCanonicalSourceFormatting);
@@ -31175,6 +31894,9 @@ namespace OpennessLLM
             AssertTrue(!Directory.Exists(Path.Combine(cloneDir, "_sync-staging")), "successful sync must remove committed staging");
             string backup = Directory.GetDirectories(Path.Combine(cloneDir, "_sync-backups"), "sync-*", SearchOption.TopDirectoryOnly).Single();
             AssertEqual(oldContent, File.ReadAllText(Path.Combine(backup, "_root", "10_FB.scl"), Encoding.UTF8), "successful sync must retain the previous source in its transaction backup");
+            Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(Path.Combine(backup, "publication-completion.json"), Encoding.UTF8), Path.Combine(backup, "publication-completion.json"));
+            AssertEqual("committed", SidecarValue(completion, "state"), "successful sync must leave an unambiguous durable committed result");
+            AssertEqual("ok", SidecarValue(completion, "diagnosticStatus"), "successful sync report publication must update the durable diagnostic status");
         }
 
         private static void SelfTestSyncCloneTransactionFailure(string caseDir)
@@ -31341,6 +32063,181 @@ namespace OpennessLLM
             AssertTrue(junctionRejected, "a current source replaced by a junction/symlink must be rejected before external bytes are read");
         }
 
+        private static SelfTestPublicationFixture CreateSelfTestPublicationExpectedFixture(
+            string caseDir,
+            bool applyPublication)
+        {
+            string logicalOutDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string stagingDir = applyPublication
+                ? Path.Combine(logicalOutDir, "_apply-validation", "run-expected-model")
+                : Path.Combine(logicalOutDir, "_sync-staging", "run-expected-model");
+            string evidenceDir = applyPublication ? stagingDir : logicalOutDir;
+            string evidenceRoot = Path.Combine(evidenceDir, "_root");
+            string compareRoot = Path.Combine(evidenceDir, "_compare", "current-model", "_root");
+            List<Dictionary<string, string>> blockRows = new List<Dictionary<string, string>>();
+            List<string[]> manifestRows = new List<string[]>();
+            foreach (Tuple<string, string> item in new[] { Tuple.Create("A", "1"), Tuple.Create("B", "2") })
+            {
+                string relative = item.Item2 + "_" + item.Item1 + ".scl";
+                string sourcePath = Path.Combine(evidenceRoot, relative);
+                string currentPath = Path.Combine(compareRoot, relative);
+                string source = "FUNCTION_BLOCK \"" + item.Item1 + "\"\nBEGIN\nEND_FUNCTION_BLOCK\n";
+                WriteTextFile(sourcePath, source);
+                WriteTextFile(currentPath, source);
+                CloneBlockRecord record = CreateSelfTestCloneIdentityRecord(item.Item1, item.Item2, relative, sourcePath, true, "tia-object-" + item.Item2, "available");
+                manifestRows.Add(BuildBlockManifestRowFromCloneRecord(record, sourcePath, "baseline"));
+                blockRows.Add(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "Status", "unchanged" }, { "SoftwarePath", "PLC" }, { "CloneSoftwarePath", "PLC" }, { "CurrentSoftwarePath", "PLC" },
+                    { "Name", item.Item1 }, { "CloneName", item.Item1 }, { "CurrentName", item.Item1 },
+                    { "Number", item.Item2 }, { "CloneNumber", item.Item2 }, { "CurrentNumber", item.Item2 },
+                    { "AutoNumber", "False" }, { "NumberMode", "Manual" }, { "NumberSpace", "FB" },
+                    { "ProgrammingLanguage", "SCL" }, { "BlockType", "FB" }, { "TypeName", "Siemens.Engineering.SW.Blocks.FB" },
+                    { "SourceTypeName", "Siemens.Engineering.SW.Blocks.FB" }, { "TiaObjectId", "tia-object-" + item.Item2 }, { "TiaObjectIdStatus", "available" },
+                    { "ClonePath", sourcePath }, { "CloneSourceSha256", ComputeFileSha256(sourcePath) }, { "CloneNormalizedSourceSha256", ComputeNormalizedTextSha256(sourcePath) },
+                    { "CurrentPath", currentPath }, { "CurrentSourceSha256", ComputeFileSha256(currentPath) }, { "CurrentNormalizedSourceSha256", ComputeNormalizedTextSha256(currentPath) },
+                    { "CloneProvenance", "tracked-baseline" }
+                });
+            }
+            WriteCsv(Path.Combine(evidenceDir, "plc-blocks.csv"), BlockManifestHeaders(), manifestRows);
+            WriteCsv(Path.Combine(evidenceDir, "block-groups.csv"), GroupManifestHeaders(), new string[0][]);
+            WriteCloneMetadata(evidenceDir);
+            CloneCheckBundleEvidence bundle = new CloneCheckBundleEvidence
+            {
+                CheckRunId = "expected-model-test",
+                CompareDirectory = Path.GetDirectoryName(compareRoot),
+                WorkspaceRows = CloneWorkspaceInventoryRows(BuildCloneWorkspaceInventory(evidenceDir)),
+                BlockRows = blockRows,
+                GroupRows = new List<Dictionary<string, string>>()
+            };
+            if (!applyPublication)
+            {
+                WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", bundle.CheckRunId);
+            }
+            else
+            {
+                WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, ApplyValidationOwnerMarkerFileName), "apply-publication", bundle.CheckRunId);
+            }
+            SyncStagingLease inputLease = new SyncStagingLease { DirectoryPath = stagingDir };
+            SyncInputSet inputs = StageImmutableSyncInputs(evidenceDir, bundle, stagingDir, inputLease, null);
+            if (!applyPublication)
+            {
+                CopyDirectory(Path.Combine(inputs.WorkspaceRoot, "_root"), Path.Combine(stagingDir, "_root"), false);
+            }
+            PublicationExpectedModel model = BuildPublicationExpectedModel(
+                logicalOutDir,
+                bundle,
+                stagingDir,
+                evidenceRoot,
+                compareRoot,
+                inputs);
+            if (applyPublication) PrepareApplyValidationWorkspaceForPublish(stagingDir, model);
+            else WriteExpectedPublicationArtifacts(stagingDir, model);
+            return new SelfTestPublicationFixture
+            {
+                LogicalOutDir = logicalOutDir,
+                StagingDir = stagingDir,
+                EvidenceRootDir = evidenceRoot,
+                CompareRootDir = compareRoot,
+                Bundle = bundle,
+                ExpectedModel = model,
+                InputLease = inputLease
+            };
+        }
+
+        private static void SelfTestSyncPublicationAuthoritativeModel(string caseDir)
+        {
+            foreach (string mutation in new[] { "csv-durable-id", "coordinated-csv-jsonl", "swapped-file-path" })
+            {
+                using (SelfTestPublicationFixture fixture = CreateSelfTestPublicationExpectedFixture(Path.Combine(caseDir, mutation), false))
+                {
+                    string blocksPath = Path.Combine(fixture.StagingDir, "plc-blocks.csv");
+                    List<Dictionary<string, string>> rows = ReadCsv(blocksPath);
+                    if (EqualsIgnoreCase(mutation, "swapped-file-path"))
+                    {
+                        string first = GetCsvValue(rows[0], "FilePath");
+                        rows[0]["FilePath"] = GetCsvValue(rows[1], "FilePath");
+                        rows[1]["FilePath"] = first;
+                    }
+                    else
+                    {
+                        rows[0]["TiaObjectId"] = string.Empty;
+                        rows[0]["TiaObjectIdStatus"] = "unavailable";
+                        rows[0]["SourceOrigin"] = "unknown";
+                    }
+                    WriteCsv(blocksPath, BlockManifestHeaders(), rows.Select(row => BlockManifestHeaders().Select(header => GetCsvValue(row, header)).ToArray()));
+                    if (EqualsIgnoreCase(mutation, "coordinated-csv-jsonl") || EqualsIgnoreCase(mutation, "swapped-file-path"))
+                    {
+                        WriteCloneMetadata(
+                            fixture.StagingDir,
+                            fixture.LogicalOutDir,
+                            blocksPath,
+                            Path.Combine(fixture.StagingDir, "block-groups.csv"));
+                    }
+                    SyncStagingLease sealLease = new SyncStagingLease { DirectoryPath = fixture.StagingDir };
+                    bool rejected = false;
+                    try
+                    {
+                        SealSyncStaging(
+                            fixture.LogicalOutDir,
+                            fixture.Bundle,
+                            fixture.StagingDir,
+                            fixture.EvidenceRootDir,
+                            fixture.CompareRootDir,
+                            fixture.ExpectedModel,
+                            sealLease);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        rejected = true;
+                    }
+                    finally
+                    {
+                        sealLease.Dispose();
+                    }
+                    AssertTrue(rejected, "sync seal must reject authoritative-model mutation: " + mutation);
+                }
+            }
+        }
+
+        private static void SelfTestApplyPublicationAuthoritativeModel(string caseDir)
+        {
+            foreach (string mutation in new[] { "durable-fields", "missing-metadata" })
+            {
+                using (SelfTestPublicationFixture fixture = CreateSelfTestPublicationExpectedFixture(Path.Combine(caseDir, mutation), true))
+                {
+                    if (EqualsIgnoreCase(mutation, "durable-fields"))
+                    {
+                        string blocksPath = Path.Combine(fixture.StagingDir, "plc-blocks.csv");
+                        List<Dictionary<string, string>> rows = ReadCsv(blocksPath);
+                        rows[0]["TiaObjectId"] = string.Empty;
+                        rows[0]["TiaObjectIdStatus"] = "unavailable";
+                        rows[0]["SourceOrigin"] = "unknown";
+                        WriteCsv(blocksPath, BlockManifestHeaders(), rows.Select(row => BlockManifestHeaders().Select(header => GetCsvValue(row, header)).ToArray()));
+                    }
+                    else
+                    {
+                        File.Delete(Path.Combine(fixture.StagingDir, "_metadata", "blocks.jsonl"));
+                    }
+                    SyncStagingLease sealLease = new SyncStagingLease { DirectoryPath = fixture.StagingDir };
+                    bool rejected = false;
+                    try
+                    {
+                        SealExistingPublicationStaging(fixture.StagingDir, fixture.Bundle, fixture.ExpectedModel, sealLease);
+                    }
+                    catch (InvalidDataException)
+                    {
+                        rejected = true;
+                    }
+                    finally
+                    {
+                        sealLease.Dispose();
+                    }
+                    AssertTrue(rejected, "apply seal must reject post-save evidence mutation: " + mutation);
+                }
+            }
+        }
+
         private static void SelfTestSyncCloneStagingSeal(string caseDir)
         {
             string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
@@ -31369,7 +32266,9 @@ namespace OpennessLLM
             };
             string stagingDir = Path.Combine(cloneDir, "_sync-staging", "run-seal");
             string stagingRoot = Path.Combine(stagingDir, "_root");
-            WriteTextFile(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "owned\n");
+            WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", "self-test-seal");
+            SyncStagingLease inputLease = new SyncStagingLease { DirectoryPath = stagingDir };
+            SyncInputSet immutableInputs = StageImmutableSyncInputs(cloneDir, bundle, stagingDir, inputLease, null);
             WriteTextFile(Path.Combine(stagingRoot, "1_A.scl"), source.Replace("1", "2"));
             bool preManifestTamperRejected = false;
             try { ValidateStagedSyncSourcesAndSidecars(stagingRoot, rootDir, compareRoot, bundle.BlockRows, bundle.WorkspaceRows); }
@@ -31377,15 +32276,14 @@ namespace OpennessLLM
             AssertTrue(preManifestTamperRejected, "a staged source modified before manifest generation must not become self-consistent evidence");
 
             WriteTextFile(Path.Combine(stagingRoot, "1_A.scl"), source);
-            WriteSyncedBlockManifest(Path.Combine(stagingDir, "plc-blocks.csv"), Path.Combine(cloneDir, "plc-blocks.csv"), rootDir, stagingRoot, compareRoot, bundle.BlockRows);
-            WriteSyncedGroupManifest(Path.Combine(stagingDir, "block-groups.csv"), Path.Combine(cloneDir, "block-groups.csv"), rootDir, bundle.GroupRows);
-            WriteCloneMetadata(stagingDir, cloneDir, Path.Combine(stagingDir, "plc-blocks.csv"), Path.Combine(stagingDir, "block-groups.csv"));
-            ValidateStagedSyncManifest(stagingDir, cloneDir, stagingRoot, bundle.BlockRows);
+            PublicationExpectedModel expectedModel = BuildPublicationExpectedModel(cloneDir, bundle, stagingDir, rootDir, compareRoot, immutableInputs);
+            WriteExpectedPublicationArtifacts(stagingDir, expectedModel);
+            ValidateExpectedPublicationArtifacts(stagingDir, expectedModel);
 
             WriteTextFile(Path.Combine(stagingRoot, "1_A.scl"), source.Replace("1", "3"));
             SyncStagingLease changedSourceLease = new SyncStagingLease { DirectoryPath = stagingDir };
             bool postManifestSourceRejected = false;
-            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, changedSourceLease); }
+            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, expectedModel, changedSourceLease); }
             catch (InvalidDataException) { postManifestSourceRejected = true; }
             finally { changedSourceLease.Dispose(); }
             AssertTrue(postManifestSourceRejected, "a staged source changed after manifest generation must fail the sealed pre-commit verification");
@@ -31396,7 +32294,7 @@ namespace OpennessLLM
             WriteTextFile(blockManifestPath, "attacker manifest\n");
             SyncStagingLease changedManifestLease = new SyncStagingLease { DirectoryPath = stagingDir };
             bool manifestReplacementRejected = false;
-            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, changedManifestLease); }
+            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, expectedModel, changedManifestLease); }
             catch (Exception) { manifestReplacementRejected = true; }
             finally { changedManifestLease.Dispose(); }
             AssertTrue(manifestReplacementRejected, "a staged manifest replaced before commit must fail semantic verification");
@@ -31407,7 +32305,7 @@ namespace OpennessLLM
             WriteTextFile(blocksMetadataPath, "{\"name\":\"Attacker\"}\n");
             SyncStagingLease changedMetadataLease = new SyncStagingLease { DirectoryPath = stagingDir };
             bool metadataReplacementRejected = false;
-            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, changedMetadataLease); }
+            try { SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, expectedModel, changedMetadataLease); }
             catch (InvalidDataException) { metadataReplacementRejected = true; }
             finally { changedMetadataLease.Dispose(); }
             AssertTrue(metadataReplacementRejected, "staged metadata replaced before commit must fail semantic verification");
@@ -31416,7 +32314,7 @@ namespace OpennessLLM
             SyncStagingLease lease = new SyncStagingLease { DirectoryPath = stagingDir };
             try
             {
-                SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, lease);
+                SealSyncStaging(cloneDir, bundle, stagingDir, rootDir, compareRoot, expectedModel, lease);
                 foreach (string protectedPath in new[]
                 {
                     Path.Combine(stagingRoot, "1_A.scl"),
@@ -31462,7 +32360,49 @@ namespace OpennessLLM
             finally
             {
                 lease.Dispose();
+                inputLease.Dispose();
                 CleanupSyncStaging(stagingDir);
+            }
+        }
+
+        private static SyncStagingLease SealSelfTestPublicationStaging(string stagingDir)
+        {
+            SyncStagingLease lease = new SyncStagingLease { DirectoryPath = stagingDir };
+            try
+            {
+                HashSet<string> files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                HashSet<string> directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string rootName in new[] { "_root", "_metadata" })
+                {
+                    string root = Path.Combine(stagingDir, rootName);
+                    directories.Add(rootName);
+                    directories.UnionWith(Directory.GetDirectories(root, "*", SearchOption.AllDirectories)
+                        .Select(path => NormalizeCloneWorkspaceRelativePath(MakeRelativePath(stagingDir, path))));
+                    files.UnionWith(Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+                        .Select(path => NormalizeCloneWorkspaceRelativePath(MakeRelativePath(stagingDir, path))));
+                }
+                files.Add("plc-blocks.csv");
+                files.Add("block-groups.csv");
+                ValidateExactSyncPublishTree(stagingDir, files, directories);
+                foreach (string relativePath in files) lease.HoldReadLock(Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                lease.ExpectedFiles = files.Select(relativePath => CreateCloneWorkspaceFileRecord(
+                        stagingDir,
+                        Path.Combine(stagingDir, relativePath.Replace('/', Path.DirectorySeparatorChar)),
+                        "self-test-publication"))
+                    .OrderBy(x => x.RelativePath, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                lease.ExpectedDirectories = directories.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                lease.PackagePath = Path.Combine(stagingDir, SyncPublicationPackageFileName);
+                CreateSyncPublicationPackage(stagingDir, lease);
+                lease.PackageSha256 = ComputeFileSha256(lease.PackagePath);
+                lease.HoldReadLock(lease.PackagePath);
+                ValidateSealedSyncStaging(stagingDir, lease);
+                return lease;
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
             }
         }
 
@@ -31488,12 +32428,12 @@ namespace OpennessLLM
                 string oldGroups = ComputeFileSha256(Path.Combine(cloneDir, "block-groups.csv"));
                 string oldMetadata = DirectoryTreeFingerprint(Path.Combine(cloneDir, "_metadata"));
                 string oldMarker = ComputeFileSha256(Path.Combine(cloneDir, CloneCheckBundleFileName));
-                WriteTextFile(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "owned\n");
+                WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", "crash-test");
                 WriteTextFile(Path.Combine(stagingDir, "_root", "new.scl"), "new-root\n");
                 WriteTextFile(Path.Combine(stagingDir, "plc-blocks.csv"), "new-blocks\n");
                 WriteTextFile(Path.Combine(stagingDir, "block-groups.csv"), "new-groups\n");
                 WriteTextFile(Path.Combine(stagingDir, "_metadata", "new.txt"), "new-metadata\n");
-                SyncStagingLease lease = SealExistingPublicationStaging(stagingDir);
+                SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir);
                 bool crashed = false;
                 try
                 {
@@ -31520,6 +32460,10 @@ namespace OpennessLLM
                 AssertEqual(oldGroups, ComputeFileSha256(Path.Combine(cloneDir, "block-groups.csv")), "group manifest recovery after " + phase);
                 AssertEqual(oldMetadata, DirectoryTreeFingerprint(Path.Combine(cloneDir, "_metadata")), "metadata recovery after " + phase);
                 AssertEqual(oldMarker, ComputeFileSha256(Path.Combine(cloneDir, CloneCheckBundleFileName)), "authorization marker recovery after " + phase);
+                Dictionary<string, string> rolledBackResult = ParseStrictFlatJsonObject(
+                    File.ReadAllText(Path.Combine(backupDir, "publication-completion.json"), Encoding.UTF8),
+                    Path.Combine(backupDir, "publication-completion.json"));
+                AssertEqual("not_committed", SidecarValue(rolledBackResult, "state"), "recovered publication must record not_committed after " + phase);
                 CleanupSyncStaging(stagingDir);
             }
 
@@ -31530,13 +32474,12 @@ namespace OpennessLLM
             WriteTextFile(Path.Combine(applyDir, "plc-blocks.csv"), "old-blocks\n");
             WriteTextFile(Path.Combine(applyDir, "block-groups.csv"), "old-groups\n");
             WriteTextFile(Path.Combine(applyDir, "_metadata", "old.txt"), "old-metadata\n");
-            WriteTextFile(Path.Combine(applyDir, CloneCheckBundleFileName), "pre-apply-marker\n");
-            WriteTextFile(Path.Combine(applyStaging, ApplyValidationOwnerMarkerFileName), "owned\n");
+            WritePublicationStagingOwnerMarker(Path.Combine(applyStaging, ApplyValidationOwnerMarkerFileName), "apply-publication", "apply-crash-test");
             WriteTextFile(Path.Combine(applyStaging, "_root", "new.scl"), "new-root\n");
             WriteTextFile(Path.Combine(applyStaging, "plc-blocks.csv"), "new-blocks\n");
             WriteTextFile(Path.Combine(applyStaging, "block-groups.csv"), "new-groups\n");
             WriteTextFile(Path.Combine(applyStaging, "_metadata", "new.txt"), "new-metadata\n");
-            using (SyncStagingLease applyLease = SealExistingPublicationStaging(applyStaging))
+            using (SyncStagingLease applyLease = SealSelfTestPublicationStaging(applyStaging))
             {
                 try
                 {
@@ -31553,6 +32496,266 @@ namespace OpennessLLM
             }
             using (AcquireCloneWorkspaceLock(applyDir, "apply-crash-recovery-test")) { }
             AssertTrue(!File.Exists(Path.Combine(applyDir, CloneCheckBundleFileName)), "post-save apply publication recovery must never resurrect the pre-apply authorization marker");
+            Dictionary<string, string> applyRolledBackResult = ParseStrictFlatJsonObject(
+                File.ReadAllText(Path.Combine(applyBackup, "publication-completion.json"), Encoding.UTF8),
+                Path.Combine(applyBackup, "publication-completion.json"));
+            AssertEqual("not_committed", SidecarValue(applyRolledBackResult, "state"), "recovered apply publication must record not_committed");
+        }
+
+        private static void SelfTestPublicationCrashChild(string cloneDir)
+        {
+            cloneDir = Path.GetFullPath(cloneDir);
+            string token = Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_CRASH_TOKEN");
+            string tokenPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-token");
+            if (cloneDir.IndexOf("self-test", StringComparison.OrdinalIgnoreCase) < 0
+                || string.IsNullOrWhiteSpace(token)
+                || !File.Exists(tokenPath)
+                || !string.Equals(File.ReadAllText(tokenPath, Encoding.UTF8).Trim(), token, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Internal abrupt-crash child is restricted to a token-bound self-test workspace.");
+            }
+            string stagingDir = Path.Combine(cloneDir, "_sync-staging", "run-abrupt-child");
+            string backupDir = Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child");
+            string signalPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-ready");
+            using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
+            {
+                CommitStagedSyncWorkspace(
+                    cloneDir,
+                    stagingDir,
+                    backupDir,
+                    "sync-clone",
+                    lease.PackagePath,
+                    lease.PackageSha256,
+                    delegate(string phase)
+                    {
+                        if (!EqualsIgnoreCase(phase, "root-installed")) return;
+                        WriteTextFile(signalPath, "ready\n");
+                        FlushFileToDisk(signalPath);
+                        System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+                    });
+            }
+        }
+
+        private static void SelfTestClonePublicationAbruptProcessKill(string caseDir)
+        {
+            string cloneDir = Path.Combine(caseDir, "self-test-abrupt", "CLONE_PROJECT");
+            string stagingDir = Path.Combine(cloneDir, "_sync-staging", "run-abrupt-child");
+            WriteTextFile(Path.Combine(cloneDir, "_root", "old.scl"), "old-root\n");
+            WriteTextFile(Path.Combine(cloneDir, "plc-blocks.csv"), "old-blocks\n");
+            WriteTextFile(Path.Combine(cloneDir, "block-groups.csv"), "old-groups\n");
+            WriteTextFile(Path.Combine(cloneDir, "_metadata", "old.txt"), "old-metadata\n");
+            WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "old-marker\n");
+            string oldState = ActivePublicationFingerprint(cloneDir);
+            string token = Guid.NewGuid().ToString("N");
+            WriteTextFile(Path.Combine(cloneDir, ".opennessllm-self-test-crash-token"), token + "\n");
+            WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", "abrupt-process-test");
+            WriteTextFile(Path.Combine(stagingDir, "_root", "new.scl"), "new-root\n");
+            WriteTextFile(Path.Combine(stagingDir, "plc-blocks.csv"), "new-blocks\n");
+            WriteTextFile(Path.Combine(stagingDir, "block-groups.csv"), "new-groups\n");
+            WriteTextFile(Path.Combine(stagingDir, "_metadata", "new.txt"), "new-metadata\n");
+
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(
+                Assembly.GetExecutingAssembly().Location,
+                "self-test-publication-crash-child --out \"" + cloneDir + "\"");
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            start.EnvironmentVariables["OPENNESSLLM_SELF_TEST_CRASH_TOKEN"] = token;
+            string signalPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-ready");
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(15);
+                while (!File.Exists(signalPath) && !process.HasExited && DateTime.UtcNow < deadline)
+                {
+                    System.Threading.Thread.Sleep(25);
+                }
+                if (!File.Exists(signalPath))
+                {
+                    string error = process.HasExited ? process.StandardError.ReadToEnd() : "child did not reach the crash phase";
+                    if (!process.HasExited) process.Kill();
+                    throw new InvalidOperationException("Abrupt publication child did not become ready: " + error);
+                }
+                process.Kill();
+                process.WaitForExit();
+            }
+            AssertTrue(File.Exists(Path.Combine(cloneDir, PublicationTransactionFileName)), "an actual killed process must leave its strict publication journal");
+            RecoverIncompletePublication(cloneDir);
+            AssertEqual(oldState, ActivePublicationFingerprint(cloneDir), "recovery after an actual process kill must restore every active publication component");
+            Dictionary<string, string> completion = ParseStrictFlatJsonObject(
+                File.ReadAllText(Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child", "publication-completion.json"), Encoding.UTF8),
+                Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child", "publication-completion.json"));
+            AssertEqual("not_committed", SidecarValue(completion, "state"), "abrupt process recovery must leave an unambiguous not_committed result");
+        }
+
+        private static Dictionary<string, string> CreateSelfTestRecoveredPublicationJournal(
+            string caseDir,
+            string operation,
+            out string cloneDir)
+        {
+            cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
+            string stagingDir = EqualsIgnoreCase(operation, "sync-clone")
+                ? Path.Combine(cloneDir, "_sync-staging", "run-forgery")
+                : Path.Combine(cloneDir, "_apply-validation", "run-forgery");
+            string backupDir = EqualsIgnoreCase(operation, "sync-clone")
+                ? Path.Combine(cloneDir, "_sync-backups", "sync-forgery")
+                : Path.Combine(cloneDir, "_apply-backups", "apply-forgery");
+            WriteTextFile(Path.Combine(cloneDir, "_root", "old.scl"), "old-root\n");
+            WriteTextFile(Path.Combine(cloneDir, "plc-blocks.csv"), "old-blocks\n");
+            WriteTextFile(Path.Combine(cloneDir, "block-groups.csv"), "old-groups\n");
+            WriteTextFile(Path.Combine(cloneDir, "_metadata", "old.txt"), "old-metadata\n");
+            if (EqualsIgnoreCase(operation, "sync-clone")) WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "old-marker\n");
+            WritePublicationStagingOwnerMarker(
+                PublicationStagingOwnerMarkerPath(stagingDir, operation),
+                operation,
+                "forgery-test");
+            WriteTextFile(Path.Combine(stagingDir, "_root", "new.scl"), "new-root\n");
+            WriteTextFile(Path.Combine(stagingDir, "plc-blocks.csv"), "new-blocks\n");
+            WriteTextFile(Path.Combine(stagingDir, "block-groups.csv"), "new-groups\n");
+            WriteTextFile(Path.Combine(stagingDir, "_metadata", "new.txt"), "new-metadata\n");
+            using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
+            {
+                try
+                {
+                    CommitStagedSyncWorkspace(
+                        cloneDir,
+                        stagingDir,
+                        backupDir,
+                        operation,
+                        lease.PackagePath,
+                        lease.PackageSha256,
+                        delegate(string phase)
+                        {
+                            if (EqualsIgnoreCase(phase, "root-installed")) throw new Exception("abrupt-stop-fixture");
+                        });
+                }
+                catch (PublicationCrashSimulationException)
+                {
+                }
+            }
+            string journalPath = Path.Combine(cloneDir, PublicationTransactionFileName);
+            Dictionary<string, string> saved = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
+            RecoverIncompletePublication(cloneDir);
+            return saved;
+        }
+
+        private static string ActivePublicationFingerprint(string cloneDir)
+        {
+            return string.Join("|", new[]
+            {
+                PublicationPathFingerprint(Path.Combine(cloneDir, "_root"), true),
+                PublicationPathFingerprint(Path.Combine(cloneDir, "plc-blocks.csv"), false),
+                PublicationPathFingerprint(Path.Combine(cloneDir, "block-groups.csv"), false),
+                PublicationPathFingerprint(Path.Combine(cloneDir, "_metadata"), true),
+                PublicationPathFingerprint(Path.Combine(cloneDir, CloneCheckBundleFileName), false)
+            });
+        }
+
+        private static void AssertForgedJournalRejectedWithoutActiveMutation(
+            string cloneDir,
+            Dictionary<string, string> journal,
+            string label)
+        {
+            string journalPath = Path.Combine(cloneDir, PublicationTransactionFileName);
+            string before = ActivePublicationFingerprint(cloneDir);
+            WriteFlatJsonObjectAtomically(journalPath, journal);
+            FlushFileToDisk(journalPath);
+            bool rejected = false;
+            try
+            {
+                RecoverIncompletePublication(cloneDir);
+            }
+            catch (Exception)
+            {
+                rejected = true;
+            }
+            AssertTrue(rejected, "forged publication journal must be rejected: " + label);
+            AssertEqual(before, ActivePublicationFingerprint(cloneDir), "forged publication journal must not move or delete an active component: " + label);
+            if (File.Exists(journalPath)) File.Delete(journalPath);
+        }
+
+        private static void SelfTestClonePublicationJournalForgery(string caseDir)
+        {
+            string syncDir;
+            Dictionary<string, string> syncJournal = CreateSelfTestRecoveredPublicationJournal(Path.Combine(caseDir, "sync"), "sync-clone", out syncDir);
+
+            Dictionary<string, string> missingOld = new Dictionary<string, string>(syncJournal, StringComparer.OrdinalIgnoreCase);
+            missingOld["oldRootExists"] = "False";
+            missingOld["oldRootSha256"] = string.Empty;
+            AssertForgedJournalRejectedWithoutActiveMutation(syncDir, missingOld, "oldRootExists=false with active baseline");
+
+            Dictionary<string, string> inconsistentOld = new Dictionary<string, string>(syncJournal, StringComparer.OrdinalIgnoreCase);
+            inconsistentOld["oldRootExists"] = "False";
+            AssertForgedJournalRejectedWithoutActiveMutation(syncDir, inconsistentOld, "oldExists=false with nonempty old fingerprint");
+
+            Dictionary<string, string> unknownState = new Dictionary<string, string>(syncJournal, StringComparer.OrdinalIgnoreCase);
+            unknownState["state"] = "attacker-state";
+            AssertForgedJournalRejectedWithoutActiveMutation(syncDir, unknownState, "unknown state");
+
+            Dictionary<string, string> unknownOperation = new Dictionary<string, string>(syncJournal, StringComparer.OrdinalIgnoreCase);
+            unknownOperation["operation"] = "attacker-operation";
+            AssertForgedJournalRejectedWithoutActiveMutation(syncDir, unknownOperation, "unknown operation");
+
+            string markerPath = PublicationStagingOwnerMarkerPath(SidecarValue(syncJournal, "stagingDir"), "sync-clone");
+            string validMarker = File.ReadAllText(markerPath, Encoding.UTF8);
+            Dictionary<string, string> changedMarker = ParseStrictFlatJsonObject(validMarker, markerPath);
+            changedMarker["transactionId"] = "ffffffffffffffffffffffffffffffff";
+            WriteFlatJsonObjectAtomically(markerPath, changedMarker);
+            AssertForgedJournalRejectedWithoutActiveMutation(syncDir, syncJournal, "staging owner transaction mismatch");
+            WriteTextFile(markerPath, validMarker);
+
+            string applyDir;
+            Dictionary<string, string> applyJournal = CreateSelfTestRecoveredPublicationJournal(Path.Combine(caseDir, "apply"), "apply-publication", out applyDir);
+            Dictionary<string, string> operationCorruption = new Dictionary<string, string>(applyJournal, StringComparer.OrdinalIgnoreCase);
+            operationCorruption["operation"] = "sync-clone";
+            AssertForgedJournalRejectedWithoutActiveMutation(applyDir, operationCorruption, "apply operation changed to sync");
+        }
+
+        private static void SelfTestClonePublicationCommittedReportFailure(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation, "CLONE_PROJECT");
+                string backup = Path.Combine(workspace, operation == "sync-clone" ? "_sync-backups" : "_apply-backups", "result-test");
+                PublicationCommitResult result = new PublicationCommitResult
+                {
+                    TransactionId = Guid.NewGuid().ToString("N"),
+                    Operation = operation,
+                    WorkspacePath = workspace,
+                    BackupDir = backup,
+                    CompletionResultPath = Path.Combine(backup, "publication-completion.json")
+                };
+                WriteTextFile(Path.Combine(workspace, "_root", "sentinel.scl"), "committed\n");
+                string activeBefore = PublicationPathFingerprint(Path.Combine(workspace, "_root"), true);
+                UpdatePublicationCompletionResult(result, "committed", "pending", "publication committed");
+                string lockedReport = Path.Combine(workspace, operation == "sync-clone" ? "sync-clone-report.csv" : "apply-clone-gate.csv");
+                Directory.CreateDirectory(Path.GetDirectoryName(lockedReport));
+                using (FileStream locked = new FileStream(lockedReport, FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                {
+                    Exception reportFailure;
+                    bool reportsWritten = TryWriteCommittedPublicationDiagnostics(
+                        result,
+                        operation,
+                        delegate
+                        {
+                            if (EqualsIgnoreCase(operation, "sync-clone"))
+                            {
+                                WriteSyncCloneReports(workspace, "compare", backup, new List<string[]>(), 0, 0, 0, 0, 0, 0, true);
+                            }
+                            else
+                            {
+                                WriteApplyCloneFinalReports(
+                                    workspace, "accepted_after_write", true, true, true, true, true,
+                                    new List<ApplyPlanItem>(), new ApplyPreflightResult(), new List<ApplyCloneGateRecord>(), new List<ApplyCloneOperationRecord>());
+                            }
+                        },
+                        out reportFailure);
+                    AssertTrue(!reportsWritten && reportFailure != null, "locked final report must exercise post-commit diagnostic failure: " + operation);
+                }
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath, Encoding.UTF8), result.CompletionResultPath);
+                AssertEqual("committed_with_diagnostic_failure", SidecarValue(completion, "state"), "durable result must distinguish committed report failure: " + operation);
+                AssertEqual(activeBefore, PublicationPathFingerprint(Path.Combine(workspace, "_root"), true), "post-commit report failure must not trigger recovery or repeat mutation: " + operation);
+            }
         }
 
         private static CloneBlockRecord CreateSelfTestCurrentCloneRecord(CloneBlockRecord clone, string currentPath)
@@ -32682,6 +33885,7 @@ namespace OpennessLLM
                 BlockManifestHeaders(),
                 new[] { BuildBlockManifestRowFromCloneRecord(baseline, sourcePath, "baseline") });
             WriteCsv(Path.Combine(cloneDir, "block-groups.csv"), new[] { "SoftwarePath", "GroupPath", "Name", "Directory" }, new string[0][]);
+            WriteCloneMetadata(cloneDir);
             string checkRunId = Guid.NewGuid().ToString("N");
             WriteCsv(
                 Path.Combine(cloneDir, CloneCheckBlockFileName),
@@ -32727,12 +33931,13 @@ namespace OpennessLLM
             WriteTextFile(Path.Combine(stagingDir, "plc-blocks.csv"), "replacement manifest\n");
             WriteTextFile(Path.Combine(stagingDir, "block-groups.csv"), "replacement groups\n");
             WriteTextFile(Path.Combine(stagingDir, "_metadata", "sentinel.txt"), "replacement metadata\n");
+            WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", "rollback-test");
             string rootBefore = DirectoryTreeFingerprint(finalRoot);
             string markerBefore = ComputeFileSha256(Path.Combine(cloneDir, CloneCheckBundleFileName));
             bool failed = false;
             try
             {
-                using (SyncStagingLease lease = SealExistingPublicationStaging(stagingDir))
+                using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
                 {
                     CommitStagedSyncWorkspace(cloneDir, stagingDir, backupDir, "sync-clone", lease.PackagePath, lease.PackageSha256, null);
                 }
@@ -33421,6 +34626,7 @@ namespace OpennessLLM
                 && !EqualsIgnoreCase(command, "hmi-digest")
                 && !EqualsIgnoreCase(command, "hmi-apply-preflight")
                 && !EqualsIgnoreCase(command, "self-test")
+                && !EqualsIgnoreCase(command, "self-test-publication-crash-child")
                 && !EqualsIgnoreCase(command, "clean-local");
         }
 
@@ -33455,6 +34661,7 @@ namespace OpennessLLM
                 || EqualsIgnoreCase(command, "hmi-project-texts-apply-preflight")
                 || EqualsIgnoreCase(command, "hmi-project-texts-apply")
                 || EqualsIgnoreCase(command, "self-test")
+                || EqualsIgnoreCase(command, "self-test-publication-crash-child")
                 || EqualsIgnoreCase(command, "clean-local")
                 || EqualsIgnoreCase(command, "clone-folders")
                 || EqualsIgnoreCase(command, "init-clone")
@@ -35758,11 +36965,62 @@ namespace OpennessLLM
             }
         }
 
+        private sealed class PublicationExpectedModel
+        {
+            public string LogicalOutDir;
+            public string EvidenceRootDir;
+            public string CompareRootDir;
+            public string MetadataGeneratedAt;
+            public List<Dictionary<string, string>> BlockRows = new List<Dictionary<string, string>>();
+            public List<Dictionary<string, string>> GroupRows = new List<Dictionary<string, string>>();
+            public HashSet<string> ExpectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> ExpectedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class PublicationCommitResult
+        {
+            public string TransactionId;
+            public string Operation;
+            public string WorkspacePath;
+            public string BackupDir;
+            public string CompletionResultPath;
+        }
+
+        private sealed class SelfTestPublicationFixture : IDisposable
+        {
+            public string LogicalOutDir;
+            public string StagingDir;
+            public string EvidenceRootDir;
+            public string CompareRootDir;
+            public CloneCheckBundleEvidence Bundle;
+            public PublicationExpectedModel ExpectedModel;
+            public SyncStagingLease InputLease;
+
+            public void Dispose()
+            {
+                if (InputLease != null) InputLease.Dispose();
+            }
+        }
+
         private sealed class PublicationCrashSimulationException : Exception
         {
             public PublicationCrashSimulationException(string phase, Exception inner)
                 : base("Injected publication process crash after phase " + phase + ".", inner)
             {
+            }
+        }
+
+        private sealed class PublicationCommittedDiagnosticException : Exception
+        {
+            public readonly PublicationCommitResult CommitResult;
+
+            public PublicationCommittedDiagnosticException(
+                string message,
+                PublicationCommitResult commitResult,
+                Exception inner)
+                : base(message, inner)
+            {
+                CommitResult = commitResult;
             }
         }
 

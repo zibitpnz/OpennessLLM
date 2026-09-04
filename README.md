@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.6`. Created by `Zibitpnz`.
+Current version: `0.12.7`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -312,7 +312,7 @@ the marker and copies signed current/workspace inputs under read leases into
 owned hash-checked files. The complete publish tree is checked against an exact
 file/directory allowlist, source/sidecar/manifest/metadata cross-references are
 validated under read locks, and commit reads only a hash-bound immutable ZIP
-package. Bundle schema 6 also binds the tool version, matcher revision, write-safety policy,
+package. Bundle schema 7 also binds the tool version, matcher revision, write-safety policy,
 normalized TIA project path, project version, stable
 project object identifier when available, the selected `SoftwarePath` set, and
 a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
@@ -329,11 +329,26 @@ the owned directory to an audited quarantine when possible. Clone workspace
 paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
 serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
-classification and is never moved as generated content. A durable publication
-journal records old/new component fingerprints around every backup/install
-phase; the next clone command deterministically restores an interrupted
-transaction before other work. A recovered post-save apply never resurrects its
-pre-apply authorization marker.
+classification and is never moved as generated content. A strict publication
+journal binds its owner, schema, canonical workspace, operation, transaction,
+staging owner, immutable package, and every old/new component fingerprint.
+Recovery validates the complete record and all participating paths before the
+first mutation; an unproven final component is never deleted. The next clone
+command deterministically restores an interrupted transaction before other
+work, and a recovered post-save apply never resurrects its pre-apply
+authorization marker. Each publication backup contains
+`publication-completion.json` with one of the durable states `not_committed`,
+`committed`, or `committed_with_diagnostic_failure`, so a failed optional report
+write cannot make an already committed operation look safe to repeat.
+
+The journal and the abrupt-child regression test cover managed failures and
+unexpected process termination while the filesystem state retained by Windows
+remains available. They do not claim power-loss, kernel-crash, controller-cache,
+or storage-device ordering guarantees: directory entry moves/deletes have no
+explicit volume-level durability barrier in this implementation. After such a
+system/storage event, inspect the journal, publication backup, and active
+components and run a fresh authoritative check instead of assuming automatic
+recovery is sufficient.
 `init-workspace` and the bundle-producing PLC portion of `status` / `check-all`
 use the same authoritative lease and clean-project rules. A successful command
 that found no selected PLC software, or `init-workspace` returning
@@ -342,7 +357,7 @@ creating PLC authorization and keeps any previous PLC bundle revoked. A PLC
 evidence failure remains a command failure even after status diagnostics have
 been written; provisional evidence is never promoted.
 `apply-clone` validates all of these against the open project before constructing
-a plan or invoking any TIA write method. Any pre-schema-6 or mismatched-policy bundle must be
+a plan or invoking any TIA write method. Any pre-schema-7 or mismatched-policy bundle must be
 refreshed by running `check-clone` again.
 
 When `TiaObjectId` is unavailable, no implementation can prove engineering-object

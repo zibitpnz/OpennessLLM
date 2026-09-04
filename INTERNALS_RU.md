@@ -474,19 +474,39 @@ identity record, включая `SoftwarePath`. Начиная с `0.12.2`, эт
 сохраняется и в `plc-blocks.csv`, и в `_metadata\blocks.jsonl`.
 
 Подписанные workspace/current inputs сначала копируются под read lease в owned
-`_sync-staging\_inputs` и проверяются по size/SHA-256. Publish-кандидат строится
-только из этих bytes. Готовые source/sidecar/CSV/metadata проверяются по точному
-allowlist, hashes и semantic cross-references уже под read-lock и запечатываются
-в hash-bound ZIP; commit использует только пакет, а не изменяемое дерево staging.
+`_sync-staging\_inputs` и проверяются по size/SHA-256. Из authoritative bundle,
+immutable inputs и фиксированных destination paths строится отдельная expected
+model. Publish-кандидат не может сам назначить себя ожидаемым состоянием:
+source/sidecar, все поля CSV/JSONL, metadata paths и полный file/directory
+allowlist сравниваются с моделью уже под read-lock. Metadata создаётся из строк
+модели, а не перечитывается из mutable CSV. Только затем кандидат запечатывается
+в hash-bound ZIP; commit использует пакет, а не изменяемое дерево staging. Тот же
+контракт применяется к post-save apply validation workspace.
 
-До первого move создаётся `.opennessllm-publication-transaction.json` с old/new
-fingerprints, staging/package/backup paths и phase state. Journal атомарно
-обновляется до и после каждой backup/install phase. Любая следующая clone-команда
-сначала завершает recovery или останавливается с точным journal path. Для
+До первого move создаётся `.opennessllm-publication-transaction.json` schema 2.
+Его exact contract связывает owner, canonical workspace, operation, transaction
+ID, staging owner, immutable package SHA-256, completion-result path и все old/new
+fingerprints. Journal атомарно обновляется до и после каждой backup/install
+phase. Recovery сначала проверяет весь journal, package, owner marker, пути и
+состояния всех компонентов без единой мутации. `oldExists=false` не разрешает
+удалить active object, пока его fingerprint не совпал с recorded new state.
+Forged/stale/corrupt record останавливается fail closed с manual-recovery
+diagnostic.
+
+В transaction backup хранится `publication-completion.json`: `not_committed`,
+`committed` или `committed_with_diagnostic_failure`. Поэтому failure финального
+report после commit не требует повторять write или восстанавливать проект. Для
 `apply-publication` после возможного Save старый authorization marker никогда не
 восстанавливается. Cleanup `_sync-staging` и `_apply-validation` имеет ownership
 marker, quarantine и audit; его ошибка после commit требует только локальной
 confidentiality cleanup, не recovery TIA project.
+
+Journal гарантирует fail-closed recovery после managed failure и abrupt process
+termination, если Windows сохранила filesystem state. Power loss, kernel crash,
+controller cache loss и storage ordering не входят в гарантию: volume-level
+barrier для directory-entry moves/deletes не реализован и VM/volume fault tests
+не проводились. После такого события требуется ручная сверка journal, backup и
+active components, затем свежий authoritative check.
 
 Это важно для:
 

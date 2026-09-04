@@ -480,12 +480,25 @@ duplicate/move screen items. Если операция не поддержана
 `check-clone`, когда текущее состояние проекта считается правильным baseline.
 
 `sync-clone` сначала копирует подписанные workspace/current source в owned
-immutable inputs под read lease и проверяет hashes. Полный кандидат `_root`,
-manifests и metadata в `_sync-staging` проходит exact inventory и semantic
-cross-check под read-lock, затем запечатывается в hash-bound ZIP. Commit читает
-только этот пакет. Durable publication journal позволяет следующей clone-команде
-восстановить старый baseline после process/system crash на любой фазе. При
-обычной ошибке команда возвращает non-zero и сохраняет текущий bundle.
+immutable inputs под read lease и проверяет hashes. Из authoritative bundle и
+этих inputs строится фиксированная expected model. Полный кандидат `_root`,
+manifests и metadata в `_sync-staging` проверяется по exact inventory и полному
+равенству всех manifest/JSONL полей под read-lock, затем запечатывается в
+hash-bound ZIP. Commit читает только этот пакет.
+
+Publication journal schema 2 строго связывает canonical workspace, operation,
+transaction ID, staging owner, package SHA-256 и old/new fingerprints. Recovery
+сначала проверяет весь контракт без изменений; неподтверждённый active component
+не удаляется. В backup записывается `publication-completion.json` со state
+`not_committed`, `committed` или `committed_with_diagnostic_failure`. Поэтому
+ошибка финального CSV/TXT после commit не означает, что write нужно повторять.
+
+Эта гарантия проверена для managed failure и внезапного завершения процесса при
+сохранённом Windows filesystem state. Она не является гарантией упорядоченности
+при отключении питания, kernel crash или потере controller/storage cache: код не
+устанавливает volume-level durability barrier для directory moves/deletes. После
+такого события нужны ручная сверка journal/backup/active components и новый
+authoritative check.
 
 Начиная с `0.12.2`, если `check-clone` нашел новый блок, созданный в TIA Portal,
 `sync-clone` сохраняет для него `SoftwarePath` и в `plc-blocks.csv`, и в
@@ -689,7 +702,7 @@ unsupported
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
 Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
-Текущий bundle schema 6 привязан к версии инструмента, matcher/write-safety
+Текущий bundle schema 7 привязан к версии инструмента, matcher/write-safety
 policy, normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
 Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata
