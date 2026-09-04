@@ -479,10 +479,13 @@ duplicate/move screen items. Если операция не поддержана
 Команда не открывает TIA Portal. Ее нужно запускать только после осознанного
 `check-clone`, когда текущее состояние проекта считается правильным baseline.
 
-`sync-clone` сначала создаёт полный кандидат `_root`, manifests и metadata в
-`_sync-staging`. Пока все операции не завершены, рабочий baseline не меняется.
-При ошибке команда возвращает non-zero и сохраняет текущий bundle; commit
-использует `_sync-backups` и rollback при неполной публикации.
+`sync-clone` сначала копирует подписанные workspace/current source в owned
+immutable inputs под read lease и проверяет hashes. Полный кандидат `_root`,
+manifests и metadata в `_sync-staging` проходит exact inventory и semantic
+cross-check под read-lock, затем запечатывается в hash-bound ZIP. Commit читает
+только этот пакет. Durable publication journal позволяет следующей clone-команде
+восстановить старый baseline после process/system crash на любой фазе. При
+обычной ошибке команда возвращает non-zero и сохраняет текущий bundle.
 
 Начиная с `0.12.2`, если `check-clone` нашел новый блок, созданный в TIA Portal,
 `sync-clone` сохраняет для него `SoftwarePath` и в `plc-blocks.csv`, и в
@@ -686,7 +689,7 @@ unsupported
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
 Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
-Текущий bundle schema 5 привязан к версии инструмента, matcher/write-safety
+Текущий bundle schema 6 привязан к версии инструмента, matcher/write-safety
 policy, normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
 Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata

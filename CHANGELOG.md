@@ -4,6 +4,30 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.6 closes the review-a4 sync/publication gaps. `sync-clone`
+  copies every signed workspace/current source through hash-checked owned input
+  files while the source handle denies writes and replacement. The completed
+  `_root`, CSV manifests, sidecars, and `_metadata` are checked against an exact
+  allowlist and semantic cross-references while read-locked, then sealed in a
+  hash-bound ZIP package; commit reads only that immutable package.
+- Clone workspace publication now has an atomically updated durable transaction
+  journal with old/new component fingerprints. Every clone command recovers an
+  interrupted sync/apply publication before doing other work. Sync recovery can
+  restore its still-valid old authorization; recovery after a possibly saved
+  apply always revokes the pre-apply marker. Crash injection covers every backup
+  and install phase.
+- Top-level block name/type parsing now uses one comment/attribute-aware scanner
+  without physical-line limits. A 25-line-header no-ID shadow regression remains
+  `ambiguous-object-correlation` and authorizes neither delete nor update.
+  `sync-clone` normalizes retained sidecars even for `unchanged` sources.
+  `_apply-validation` and sync staging cleanup are ownership-marked, audited,
+  and quarantined on failure without misreporting a committed operation as a
+  project-recovery failure.
+- Review-a4 regression coverage passes `92/92` offline self-tests, including
+  current-source copy races/reparse points, pre/post-manifest staging tampering,
+  manifest/metadata replacement, unknown files, late junctions, nine publication
+  crash points, post-save apply marker revocation, long source headers, and
+  contradictory unchanged sidecars.
 - Version 0.12.5 closes the review-a3 apply/correlation gaps. Apply staging now
   fixes raw and canonical execution digests in each plan item, holds every staged
   file with `FileAccess.Read` / `FileShare.Read`, and revalidates the workspace

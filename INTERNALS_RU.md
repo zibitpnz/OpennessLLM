@@ -434,6 +434,12 @@ attempt без публикации PLC bundle; прежний bundle остаё
 Immutable snapshot в `%TEMP%` принадлежит lease и удаляется строго; failed cleanup
 завершает команду ошибкой и по возможности карантинируется с audit-файлом.
 
+Если `TiaObjectId` unavailable, невозможно гарантировать continuity исходного
+engineering object для всех комбинаций replacement + rename + renumber +
+существенное изменение source. Matcher блокирует доказуемые shadow/ambiguous
+components, но разрешённый fallback без ID остаётся явно `unproven` и требует
+учёта этого ограничения в safety assessment.
+
 Типовые статусы:
 
 ```text
@@ -467,12 +473,20 @@ project-side added block, `sync-clone` должен перенести в baseli
 identity record, включая `SoftwarePath`. Начиная с `0.12.2`, это поле
 сохраняется и в `plc-blocks.csv`, и в `_metadata\blocks.jsonl`.
 
-Файловые операции выполняются не над рабочим `_root`, а над полной копией в
-`_sync-staging`. Там же заранее строятся новые manifests и metadata. При любой
-ошибке staging удаляется, команда возвращает non-zero, а старые `_root`,
-manifests, metadata и bundle остаются неизменными. Commit сначала переносит
-старое состояние в `_sync-backups`; если установка нового состояния не
-завершилась, выполняется rollback.
+Подписанные workspace/current inputs сначала копируются под read lease в owned
+`_sync-staging\_inputs` и проверяются по size/SHA-256. Publish-кандидат строится
+только из этих bytes. Готовые source/sidecar/CSV/metadata проверяются по точному
+allowlist, hashes и semantic cross-references уже под read-lock и запечатываются
+в hash-bound ZIP; commit использует только пакет, а не изменяемое дерево staging.
+
+До первого move создаётся `.opennessllm-publication-transaction.json` с old/new
+fingerprints, staging/package/backup paths и phase state. Journal атомарно
+обновляется до и после каждой backup/install phase. Любая следующая clone-команда
+сначала завершает recovery или останавливается с точным journal path. Для
+`apply-publication` после возможного Save старый authorization marker никогда не
+восстанавливается. Cleanup `_sync-staging` и `_apply-validation` имеет ownership
+marker, quarantine и audit; его ошибка после commit требует только локальной
+confidentiality cleanup, не recovery TIA project.
 
 Это важно для:
 
