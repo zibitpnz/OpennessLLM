@@ -663,9 +663,12 @@ Delete — удалить, а Create — получить ID, которого �
 cleanup сохраняется как aggregate failure; присутствие временного source после
 Delete или изменение полного ExternalSource set запрещает переход к Save.
 Успешный возврат `GenerateSource` без ожидаемого файла считается export error.
-Каталог свежих source evidence имеет ownership marker, удаляется в `finally`, а
-неудачный cleanup переносит его в `_preflight-quarantine` и завершает команду
-ошибкой. После экспорта `Project.IsModified` читается повторно: dirty/unavailable
+Каталог свежих source evidence имеет ownership marker. Нужные live bytes
+копируются в immutable staging, после чего каталог строго удаляется до backup и
+первой TIA write; неудачный cleanup переносит его в `_preflight-quarantine` и
+завершает команду без mutation. Outer cleanup остаётся только аварийной защитой
+для сбоев до этой границы и сохраняет primary exception первым. После экспорта
+`Project.IsModified` читается повторно: dirty/unavailable
 блокирует backup и mutation без явного unsafe override.
 Canonical source включает нормализованные комментарии: comment-only edit — это
 изменение документации, а не formatting. Для pure rename ожидаемый source берётся
@@ -1063,9 +1066,10 @@ clean-local classification;
 HMI ProjectTexts final gates;
 apply-clone gates;
 canonical source formatting.
-TIA object-ID baseline correlation and ambiguous rename+renumber;
+TIA object-ID baseline correlation, global no-ID ambiguity and old-number reuse;
 authorization completion without PLC and failed PLC evidence revocation;
-missing GenerateSource output, pre-state cleanup/quarantine, post-export dirty gate.
+bundle schema/policy revision rejection; missing GenerateSource output,
+pre-state cleanup-before-write/quarantine, post-export dirty gate.
 ```
 
 Self-test не заменяет real TIA integration run, но быстро ловит регрессии в

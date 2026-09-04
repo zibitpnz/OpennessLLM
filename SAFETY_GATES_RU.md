@@ -248,7 +248,8 @@ InstanceOfName для Instance DB.
 ```
 
 `check-clone` выполняется после любых изменений source, sidecar или manifest.
-Schema 4 связывает bundle с полным отсортированным workspace inventory; edit,
+Schema 5 связывает bundle с полным отсортированным workspace inventory и с
+версиями matcher/write-safety policy; edit,
 add, delete и rename после check отклоняются до TIA write. Реальный apply требует
 `--apply --save`, а неполный `--name`/`--group` selection запрещён при наличии
 других dirty rows.
@@ -358,11 +359,14 @@ bundle schema для записи больше не
 принимается: после обновления нужен новый `check-clone`.
 
 При сравнении baseline с live TIA сначала резервируются пары с одинаковым
-доступным `TiaObjectId`, и только затем применяются path/logical/number fallback.
+доступным `TiaObjectId`, и только затем применяются path/logical fallback.
 Разные доступные ID дают блокирующий `object-replaced-or-mismatched`. Одновременные
 rename и renumber при недоступном ID дают блокирующий
 `ambiguous-rename-and-renumber`, поэтому из такого состояния нельзя автоматически
-получить destructive apply.
+получить destructive apply. Оставшиеся number/no-ID кандидаты рассматриваются
+глобально: только взаимно однозначная изолированная number-пара разрешена, а
+неоднозначный компонент даёт `ambiguous-object-correlation` и не порождает
+Rename/Delete/Create plan.
 
 Успешный `status`/`check-all` без выбранного PLC и ранний результат
 `ExistingWorkspace` у `init-workspace` завершают refresh без PLC bundle: attempt
@@ -427,9 +431,11 @@ pre-state и Create/Update/Rename/Delete continuity; недоступные IDs 
 его остаток или изменение полного ExternalSource set запрещают `SaveProject`.
 Каждый `GenerateSource` обязан создать ожидаемый файл. После полного pre-state
 экспорта повторно проверяется `Project.IsModified`; новое dirty/unavailable
-состояние блокирует backup и mutation без явного unsafe override. Owned каталог
-`_preflight\authoritative-*` всегда удаляется, а ошибка cleanup приводит к
-audited `_preflight-quarantine` и ошибке команды.
+состояние блокирует backup и mutation без явного unsafe override. Нужные live
+source bytes сначала копируются в immutable staging, затем owned каталог
+`_preflight\authoritative-*` строго удаляется до backup и первой TIA write.
+Ошибка cleanup приводит к audited `_preflight-quarantine`, before-write failure
+и гарантированному отсутствию TIA mutation.
 
 Для LAD/FBD/GRAPH действует дополнительная осторожность. Нужна явная проверка
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это

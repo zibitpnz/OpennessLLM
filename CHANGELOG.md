@@ -8,14 +8,27 @@ All notable changes to OpennessLLM are recorded in this file.
   before path/logical/number fallback. Different usable IDs produce the blocking
   `object-replaced-or-mismatched` status, while rename plus renumber without a
   durable ID produces `ambiguous-rename-and-renumber` and no automatic pair.
+  Remaining no-ID candidates are resolved from a global graph; only an isolated
+  mutually unique number edge is accepted, while a non-bijective component is
+  blocked as `ambiguous-object-correlation`.
+- Clone-check bundle schema is now 5 and binds `toolVersion`,
+  `cloneMatcherRevision`, and `writeSafetyPolicyRevision`. Bundles produced by
+  older matcher/write semantics are rejected by both apply and sync with an
+  instruction to run a fresh `check-clone`.
+- Verification for the review-a2 hardening passed `78/78` offline self-tests.
+  A live TIA Portal V21 schema-5 lifecycle then completed a clean check, a
+  one-item comment-only dry-run/apply/compile/save, and the reverse cycle. Both
+  compiles finished with zero errors/warnings; each operation left the existing
+  authoritative pre-state directory count unchanged and apply staging empty.
 - Authorization refresh now completes explicitly with a PLC bundle, without PLC
   authorization, or as an aborted revoked attempt. HMI-only status/init and the
   `ExistingWorkspace` outcome no longer fail merely because no PLC bundle was
   produced; a PLC evidence exception cannot promote provisional reports.
 - Complete apply pre-state source export now treats missing generated files as
   errors, repeats the project dirty-state gate after export, and strictly removes
-  its owned `_preflight\authoritative-*` directory on every exit. Failed cleanup
-  is quarantined with an audit and fails the command.
+  its owned `_preflight\authoritative-*` directory after immutable staging and
+  before backup or the first TIA write. Failed cleanup is quarantined with an
+  audit and is reported as a no-mutation before-write failure.
 - Authoritative `check-clone`, `init-workspace`, and bundle-producing
   `status` / `check-all` collection now runs under one
   `TiaPortal.ExclusiveAccess` lease, requires a clean project before and after
@@ -43,7 +56,7 @@ All notable changes to OpennessLLM are recorded in this file.
   the exact compare directory, normalized project path, project version, stable
   project object identifier when available, and selected `SoftwarePath` set.
   `apply-clone` / `sync-clone` reject missing, interrupted, tampered, cross-run,
-  or wrong-project bundles before mutation. Schema 4 also binds every source,
+  or wrong-project bundles before mutation. Schema 5 also binds every source,
   sidecar, PLC manifest, and `_metadata` file by relative path, size, and hash;
   older bundles require a fresh `check-clone`. Diff generation and workspace
   inventory now use the same immutable local snapshot, every clone-source hash

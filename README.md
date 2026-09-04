@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.3`. Created by `Zibitpnz`.
+Current version: `0.12.4`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -253,10 +253,15 @@ Baseline-to-current matching reserves equal usable TIA object identifiers before
 path/name/number fallbacks. A fallback candidate with a different usable ID is
 reported as blocking `object-replaced-or-mismatched`; simultaneous rename and
 renumber with unavailable IDs is blocking `ambiguous-rename-and-renumber`.
+Remaining no-ID number and rename/renumber candidates are evaluated as one
+global graph: a non-bijective component is blocking
+`ambiguous-object-correlation`, so old-number reuse cannot authorize a rename or
+delete plan.
 The complete pre-state export must actually create every requested source file,
 must leave `Project.IsModified=false` unless the explicit unsafe override is in
-effect, and is removed through an owned strict-cleanup lease. Cleanup failure
-quarantines the export with an audit file and fails the command.
+effect. Required live bytes are first copied into immutable staging, then the
+owned export is strictly removed before backup or the first TIA write. Cleanup
+failure is a before-write blocker and quarantines the export with an audit file.
 For a real apply, the filesystem project backup is created under the same
 `ExclusiveAccess` lease after all pre-write gates pass. If the clone workspace
 is inside the project directory, that active `--out` directory is excluded from
@@ -291,7 +296,8 @@ clean-project and fresh-inventory checks does the marker transition to
 `sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
 or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
 the marker and rechecks current-source hashes before changing `_root`. Bundle
-schema 4 also binds the normalized TIA project path, project version, stable
+schema 5 also binds the tool version, matcher revision, write-safety policy,
+normalized TIA project path, project version, stable
 project object identifier when available, the selected `SoftwarePath` set, and
 a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
 `check-clone` holds `TiaPortal.ExclusiveAccess` while collecting the complete
@@ -316,7 +322,7 @@ creating PLC authorization and keeps any previous PLC bundle revoked. A PLC
 evidence failure remains a command failure even after status diagnostics have
 been written; provisional evidence is never promoted.
 `apply-clone` validates all of these against the open project before constructing
-a plan or invoking any TIA write method. Any pre-schema-4 bundle must be
+a plan or invoking any TIA write method. Any pre-schema-5 or mismatched-policy bundle must be
 refreshed by running `check-clone` again.
 
 Every new clone-only block must have a sidecar file next to the source file:

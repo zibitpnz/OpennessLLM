@@ -1,6 +1,6 @@
 # OpennessLLM Command Reference
 
-Версия инструмента: `0.12.3`.
+Версия инструмента: `0.12.4`.
 
 Создано: `Zibitpnz`.
 
@@ -27,7 +27,7 @@ Probe/copy-only Пишут только во временную копию пр�
 Write           Могут изменить TIA проект, требуют явный --apply.
 ```
 
-Write-команды TIA-проекта в версии `0.12.3`:
+Write-команды TIA-проекта в версии `0.12.4`:
 
 ```text
 apply-clone
@@ -679,13 +679,15 @@ added
 removed
 object-replaced-or-mismatched
 ambiguous-rename-and-renumber
+ambiguous-object-correlation
 source-blocker
 unsupported
 ```
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
 Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
-Текущий bundle schema 4 привязан к normalized project path, версии проекта,
+Текущий bundle schema 5 привязан к версии инструмента, matcher/write-safety
+policy, normalized project path, версии проекта,
 стабильному project object ID при доступности и выбранному `SoftwarePath`.
 Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata
 файлов. Diff и inventory создаются из одного immutable snapshot, затем live
@@ -769,8 +771,10 @@ metadata всех live blocks/groups, а также SHA-256 каждого эк�
 строго: ошибка `Delete()` или остаток в коллекции запрещает `SaveProject`.
 `GenerateSource` без ожидаемого файла является ошибкой. После полного экспорта
 повторно проверяется `Project.IsModified`; dirty/unavailable блокирует backup и
-mutation без unsafe override. Owned `_preflight\authoritative-*` удаляется при
-любом исходе, а cleanup failure карантинируется и завершает команду ошибкой.
+mutation без unsafe override. После immutable staging owned
+`_preflight\authoritative-*` строго удаляется до backup и первой TIA write;
+cleanup failure карантинируется и завершает команду с явным no-mutation
+before-write результатом.
 После записи проверяются точные postconditions каждого Create/Update/Rename/Delete,
 полный состав blocks/groups, доступная object-ID continuity и language-aware
 SCL/STL token stream. Комментарии входят в canonical content, поэтому

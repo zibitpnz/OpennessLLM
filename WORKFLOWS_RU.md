@@ -150,7 +150,8 @@ CLONE_PROJECT\hmi-check-summary.txt
 ```
 
 Статусы `object-replaced-or-mismatched` и
-`ambiguous-rename-and-renumber` нельзя принимать через автоматический apply:
+`ambiguous-rename-and-renumber`, а также `ambiguous-object-correlation` нельзя
+принимать через автоматический apply:
 сначала нужно вручную разобраться, какой именно engineering object должен
 соответствовать baseline, затем снова выполнить `check-clone`.
 

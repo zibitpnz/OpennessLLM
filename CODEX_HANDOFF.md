@@ -8,7 +8,7 @@ and `CHANGELOG.md`.
 `OpennessLLM` is a C#/.NET Framework command-line tool for LLM-assisted TIA
 Portal Openness engineering work.
 
-Version: `0.12.3`.
+Version: `0.12.4`.
 
 Created by: `Zibitpnz`.
 
