@@ -486,7 +486,7 @@ manifests и metadata в `_sync-staging` проверяется по exact inven
 равенству всех manifest/JSONL полей под read-lock, затем запечатывается в
 hash-bound ZIP. Commit читает только этот пакет.
 
-Publication journal schema 3 строго связывает canonical workspace, operation,
+Publication journal schema 4 строго связывает canonical workspace, operation,
 transaction ID, staging owner, package SHA-256, installation directory и old/new
 fingerprints. Распаковка и проверка всех компонентов завершаются во временном
 каталоге транзакции до перемещения старого baseline в backup. Установка каждого
@@ -495,6 +495,18 @@ fingerprints. Распаковка и проверка всех компонен
 не удаляется. В backup записывается `publication-completion.json` со state
 `not_committed`, `committed` или `committed_with_diagnostic_failure`. Поэтому
 ошибка финального CSV/TXT после commit не означает, что write нужно повторять.
+
+После подготовки active workspace повторно сверяется с ИСХОДНЫМ authoritative
+inventory. Старые объекты перемещаются по открытым Windows handles; journal
+фиксирует volume/file IDs до каждого rename. Уже захваченное дерево ещё раз
+сверяется с исходным inventory/fingerprints под read leases до установки нового.
+Правка в промежутке вызывает отказ, а не обновление разрешённых old hashes.
+До `captured-verified` recovery возвращает идентифицированные объекты вместе с
+поздними правками только на отсутствующие исходные пути. Чужой/пропавший backup
+или заново созданный active path останавливают recovery с сохранением evidence,
+без перезаписи пользовательских данных. После отказа нужен новый `check-clone`.
+Требуются Windows `FILE_ID_INFO` и same-volume rename по handle; без поддержки
+файловой системы операция запрещена. Это filesystem IDs, не TIA object IDs.
 
 Если временная блокировка прервала rollback, cleanup сохраняет staging, ZIP и
 owner marker по исходным путям до завершения восстановления. Это действует и
@@ -507,7 +519,7 @@ owner marker по исходным путям до завершения восс
 сохранённом журнале имеет приоритет. Следующая clone-команда проверит baseline,
 допишет completion и только затем освободит journal/package. Старые schema
 журнала требуют ручного разбора с сохранением всех файлов транзакции.
-Текущая версия `0.12.8`, write policy `clone-write-policy-v9`; старый bundle нужно
+Текущая версия `0.12.9`, write policy `clone-write-policy-v10`; старый bundle нужно
 обновить через `check-clone`.
 
 Эта гарантия проверена для managed failure и внезапного завершения процесса при

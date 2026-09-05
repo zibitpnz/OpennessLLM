@@ -7,36 +7,38 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 [assembly: AssemblyTitle("OpennessLLM")]
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.8.0")]
-[assembly: AssemblyFileVersion("0.12.8.0")]
+[assembly: AssemblyVersion("0.12.9.0")]
+[assembly: AssemblyFileVersion("0.12.9.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.8";
+        private const string ProductVersion = "0.12.9";
         private const string ProductVersionDate = "2026-09-05";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "7";
         private const string CloneMatcherRevision = "global-object-correlation-v5";
-        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v9";
+        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v10";
         private const string ApplyStagingOwnerMarkerFileName = ".opennessllm-apply-staging-owner";
         private const string ApplyValidationOwnerMarkerFileName = ".opennessllm-apply-validation-owner";
         private const string SyncStagingOwnerMarkerFileName = ".opennessllm-sync-staging-owner";
         private const string SyncPublicationPackageFileName = ".opennessllm-publication.zip";
         private const string PublicationTransactionFileName = ".opennessllm-publication-transaction.json";
-        private const string PublicationJournalSchemaVersion = "3";
+        private const string PublicationJournalSchemaVersion = "4";
         private const string PublicationOwnerMarkerSchemaVersion = "1";
         private const string PublicationResultSchemaVersion = "1";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
@@ -16512,8 +16514,8 @@ namespace OpennessLLM
                 throw new InvalidOperationException("sync-clone stopped before commit because immutable staging verification failed; the active baseline and authorization bundle were left unchanged.", ex);
             }
 
-            // Close the editor race after staging: a changed active workspace
-            // is never moved to backup and replaced by stale staged bytes.
+            // Early rejection only. The publisher repeats this original-bundle
+            // check after preparation and verifies the captured tree before install.
             try
             {
                 ValidateCloneWorkspaceInventory(outDir, bundle.WorkspaceRows);
@@ -16529,7 +16531,7 @@ namespace OpennessLLM
             try
             {
                 ValidateSealedSyncStaging(stagingDir, syncLease);
-                publicationCommit = CommitStagedSyncWorkspace(outDir, stagingDir, backupDir, "sync-clone", syncLease.PackagePath, syncLease.PackageSha256, null);
+                publicationCommit = CommitStagedSyncWorkspaceBound(outDir, stagingDir, backupDir, "sync-clone", syncLease.PackagePath, syncLease.PackageSha256, bundle.WorkspaceRows, null);
             }
             catch (PublicationCommittedDiagnosticException committedDiagnostic)
             {
@@ -17487,6 +17489,22 @@ namespace OpennessLLM
             string expectedPackageSha256,
             Action<string> crashHook)
         {
+            // Offline fixtures have no authoritative bundle. Production callers
+            // use the bound entry point with the ORIGINAL check's inventory.
+            return CommitStagedSyncWorkspaceBound(outDir, stagingDir, backupDir, operation,
+                packagePath, expectedPackageSha256, CloneWorkspaceInventoryRows(BuildCloneWorkspaceInventory(outDir)), crashHook);
+        }
+
+        private static PublicationCommitResult CommitStagedSyncWorkspaceBound(
+            string outDir,
+            string stagingDir,
+            string backupDir,
+            string operation,
+            string packagePath,
+            string expectedPackageSha256,
+            List<Dictionary<string, string>> originalWorkspaceRows,
+            Action<string> crashHook)
+        {
             RecoverIncompletePublication(outDir);
             outDir = Path.GetFullPath(outDir);
             stagingDir = Path.GetFullPath(stagingDir);
@@ -17565,6 +17583,11 @@ namespace OpennessLLM
                 { "oldMetadataSha256", PublicationPathFingerprint(finalMetadata, true) },
                 { "oldMarkerExists", File.Exists(finalMarker).ToString() },
                 { "oldMarkerSha256", PublicationPathFingerprint(finalMarker, false) },
+                { "oldRootCaptureIdentity", string.Empty },
+                { "oldBlocksCaptureIdentity", string.Empty },
+                { "oldGroupsCaptureIdentity", string.Empty },
+                { "oldMetadataCaptureIdentity", string.Empty },
+                { "oldMarkerCaptureIdentity", string.Empty },
                 { "newRootSha256", PackageComponentFingerprint(packagePath, "_root") },
                 { "newBlocksSha256", PackageFileFingerprint(packagePath, "plc-blocks.csv") },
                 { "newGroupsSha256", PackageFileFingerprint(packagePath, "block-groups.csv") },
@@ -17590,49 +17613,66 @@ namespace OpennessLLM
                 PreparePublicationComponent(packagePath, "_metadata", true, installationDir, journalPath, journal, "metadata", crashHook);
                 ValidateInstalledPublication(installationDir, journal);
 
+                // Preparation can be expensive. Never authorize late editor
+                // bytes by refreshing the old fingerprints or the input bundle.
+                ValidateCloneWorkspaceInventory(outDir, originalWorkspaceRows);
+                ValidateOriginalPublicationComponents(outDir, journal);
+                InvokePublicationCrashHook(crashHook, "workspace-revalidated");
+
                 MovePublicationComponentWithJournal(finalRoot, backupRoot, true, journalPath, journal, "root-backed-up", crashHook);
                 MovePublicationComponentWithJournal(finalBlocks, backupBlocks, false, journalPath, journal, "blocks-backed-up", crashHook);
                 MovePublicationComponentWithJournal(finalGroups, backupGroups, false, journalPath, journal, "groups-backed-up", crashHook);
                 MovePublicationComponentWithJournal(finalMetadata, backupMetadata, true, journalPath, journal, "metadata-backed-up", crashHook);
                 MovePublicationComponentWithJournal(finalMarker, backupMarker, false, journalPath, journal, "marker-backed-up", crashHook);
 
-                WritePublicationJournal(journalPath, journal, "before-root-installed");
-                InstallPreparedPublicationComponent(installationDir, "_root", finalRoot, true, journal["newRootSha256"]);
-                InvokePublicationCrashHook(crashHook, "root-renamed");
-                WritePublicationJournal(journalPath, journal, "root-installed");
-                InvokePublicationCrashHook(crashHook, "root-installed");
-                WritePublicationJournal(journalPath, journal, "before-blocks-installed");
-                InstallPreparedPublicationComponent(installationDir, "plc-blocks.csv", finalBlocks, false, journal["newBlocksSha256"]);
-                InvokePublicationCrashHook(crashHook, "blocks-renamed");
-                WritePublicationJournal(journalPath, journal, "blocks-installed");
-                InvokePublicationCrashHook(crashHook, "blocks-installed");
-                WritePublicationJournal(journalPath, journal, "before-groups-installed");
-                InstallPreparedPublicationComponent(installationDir, "block-groups.csv", finalGroups, false, journal["newGroupsSha256"]);
-                InvokePublicationCrashHook(crashHook, "groups-renamed");
-                WritePublicationJournal(journalPath, journal, "groups-installed");
-                InvokePublicationCrashHook(crashHook, "groups-installed");
-                WritePublicationJournal(journalPath, journal, "before-metadata-installed");
-                InstallPreparedPublicationComponent(installationDir, "_metadata", finalMetadata, true, journal["newMetadataSha256"]);
-                InvokePublicationCrashHook(crashHook, "metadata-renamed");
-                WritePublicationJournal(journalPath, journal, "metadata-installed");
-                InvokePublicationCrashHook(crashHook, "metadata-installed");
+                // The checked names may still have changed just before capture.
+                // Until this barrier, recovery returns the IDENTIFIED captured
+                // objects (including edits), never installs or deletes active data.
+                using (SyncStagingLease capturedLease = LeaseCapturedPublication(backupDir))
+                {
+                    ValidateCloneWorkspaceInventory(backupDir, originalWorkspaceRows);
+                    ValidateOriginalPublicationComponents(backupDir, journal);
+                    WritePublicationJournal(journalPath, journal, "captured-verified");
+                    InvokePublicationCrashHook(crashHook, "captured-verified");
 
-                ValidateInstalledPublication(outDir, journal);
-                WritePublicationJournal(journalPath, journal, "committed");
-                try
-                {
-                    WritePublicationCompletionResult(journal, "committed", "pending", "Publication committed; optional diagnostics have not completed yet.");
-                    File.Delete(journalPath);
+                    WritePublicationJournal(journalPath, journal, "before-root-installed");
+                    InstallPreparedPublicationComponent(installationDir, "_root", finalRoot, true, journal["newRootSha256"]);
+                    InvokePublicationCrashHook(crashHook, "root-renamed");
+                    WritePublicationJournal(journalPath, journal, "root-installed");
+                    InvokePublicationCrashHook(crashHook, "root-installed");
+                    WritePublicationJournal(journalPath, journal, "before-blocks-installed");
+                    InstallPreparedPublicationComponent(installationDir, "plc-blocks.csv", finalBlocks, false, journal["newBlocksSha256"]);
+                    InvokePublicationCrashHook(crashHook, "blocks-renamed");
+                    WritePublicationJournal(journalPath, journal, "blocks-installed");
+                    InvokePublicationCrashHook(crashHook, "blocks-installed");
+                    WritePublicationJournal(journalPath, journal, "before-groups-installed");
+                    InstallPreparedPublicationComponent(installationDir, "block-groups.csv", finalGroups, false, journal["newGroupsSha256"]);
+                    InvokePublicationCrashHook(crashHook, "groups-renamed");
+                    WritePublicationJournal(journalPath, journal, "groups-installed");
+                    InvokePublicationCrashHook(crashHook, "groups-installed");
+                    WritePublicationJournal(journalPath, journal, "before-metadata-installed");
+                    InstallPreparedPublicationComponent(installationDir, "_metadata", finalMetadata, true, journal["newMetadataSha256"]);
+                    InvokePublicationCrashHook(crashHook, "metadata-renamed");
+                    WritePublicationJournal(journalPath, journal, "metadata-installed");
+                    InvokePublicationCrashHook(crashHook, "metadata-installed");
+
+                    ValidateInstalledPublication(outDir, journal);
+                    WritePublicationJournal(journalPath, journal, "committed");
+                    try
+                    {
+                        WritePublicationCompletionResult(journal, "committed", "pending", "Publication committed; optional diagnostics have not completed yet.");
+                        File.Delete(journalPath);
+                    }
+                    catch (Exception diagnosticException)
+                    {
+                        commitResult.DiagnosticFailure = diagnosticException;
+                        throw new PublicationCommittedDiagnosticException(
+                            "Clone publication committed; recovery is not required, but durable completion diagnostics could not be finalized. Journal: " + journalPath,
+                            commitResult,
+                            diagnosticException);
+                    }
+                    return commitResult;
                 }
-                catch (Exception diagnosticException)
-                {
-                    commitResult.DiagnosticFailure = diagnosticException;
-                    throw new PublicationCommittedDiagnosticException(
-                        "Clone publication committed; recovery is not required, but durable completion diagnostics could not be finalized. Journal: " + journalPath,
-                        commitResult,
-                        diagnosticException);
-                }
-                return commitResult;
             }
             catch (PublicationCrashSimulationException)
             {
@@ -17657,7 +17697,9 @@ namespace OpennessLLM
                         "Clone workspace publication failed and durable recovery was incomplete. Follow the transaction journal at " + journalPath + ".",
                         new AggregateException(ex, recoveryException));
                 }
-                throw new InvalidOperationException("Clone workspace publication failed; the previous durable baseline was restored from the transaction journal.", ex);
+                throw new InvalidOperationException(IsPublicationCaptureState(SidecarValue(journal, "state"))
+                    ? "Clone workspace publication was not committed; local edits were preserved and captured objects were returned. Run check-clone again."
+                    : "Clone workspace publication failed; the previous durable baseline was restored from the transaction journal.", ex);
             }
         }
 
@@ -17670,12 +17712,26 @@ namespace OpennessLLM
             string completedState,
             Action<string> crashHook)
         {
-            WritePublicationJournal(journalPath, journal, "before-" + completedState);
+            string component = completedState.Substring(0, completedState.IndexOf('-'));
+            string identityKey = "old" + char.ToUpperInvariant(component[0]) + component.Substring(1) + "CaptureIdentity";
+            InvokePublicationCrashHook(crashHook, "before-" + component + "-capture");
             bool exists = directory ? Directory.Exists(source) : File.Exists(source);
+            if (exists && !ParsePublicationJournalExists(journal, identityKey.Substring(0, identityKey.Length - "CaptureIdentity".Length), journalPath))
+                throw new InvalidDataException("An unexpected active component appeared before capture; it was not moved: " + source);
             if (exists)
             {
-                if (directory) Directory.Move(source, destination); else File.Move(source, destination);
+                // This handle denies replacement of the identified object.
+                // Rename by HANDLE closes the identity/read-to-path-move race.
+                using (SafeFileHandle handle = OpenPublicationCaptureHandle(source, true))
+                {
+                    journal[identityKey] = PublicationHandleIdentity(handle);
+                    WritePublicationJournal(journalPath, journal, "before-" + completedState);
+                    InvokePublicationCrashHook(crashHook, component + "-capture-bound");
+                    RenamePublicationHandle(handle, source, destination);
+                    InvokePublicationCrashHook(crashHook, component + "-backup-renamed");
+                }
             }
+            else WritePublicationJournal(journalPath, journal, "before-" + completedState);
             WritePublicationJournal(journalPath, journal, completedState);
             if (exists) InvokePublicationCrashHook(crashHook, completedState);
         }
@@ -17692,6 +17748,166 @@ namespace OpennessLLM
                     { "checkRunId", EmptyIfNull(checkRunId) }
                 });
             FlushFileToDisk(markerPath);
+        }
+
+        private static readonly string[] PublicationComponentNames = { "_root", "plc-blocks.csv", "block-groups.csv", "_metadata", CloneCheckBundleFileName };
+        private static readonly string[] PublicationOldKeys = { "oldRoot", "oldBlocks", "oldGroups", "oldMetadata", "oldMarker" };
+
+        private static bool PublicationComponentIsDirectory(int index) { return index == 0 || index == 3; }
+
+        private static void ValidateOriginalPublicationComponents(string directory, Dictionary<string, string> journal)
+        {
+            for (int i = 0; i < PublicationComponentNames.Length; i++)
+            {
+                string path = Path.Combine(directory, PublicationComponentNames[i]);
+                bool isDirectory = PublicationComponentIsDirectory(i);
+                bool exists = isDirectory ? Directory.Exists(path) : File.Exists(path);
+                if (exists != ParsePublicationJournalExists(journal, PublicationOldKeys[i], PublicationTransactionFileName)
+                    || (isDirectory ? File.Exists(path) : Directory.Exists(path))
+                    || !EqualsIgnoreCase(PublicationPathFingerprint(path, isDirectory), journal[PublicationOldKeys[i] + "Sha256"]))
+                    throw new InvalidDataException("Active/captured workspace changed during publication; the original evidence does not authorize replacing local edits: " + path);
+            }
+        }
+
+        private static SyncStagingLease LeaseCapturedPublication(string backupDir)
+        {
+            SyncStagingLease lease = new SyncStagingLease();
+            try
+            {
+                EnsureExistingTreeHasNoReparsePoints(backupDir, "captured publication");
+                for (int i = 0; i < PublicationComponentNames.Length; i++)
+                {
+                    string path = Path.Combine(backupDir, PublicationComponentNames[i]);
+                    if (PublicationComponentIsDirectory(i))
+                    {
+                        if (Directory.Exists(path))
+                            foreach (string file in Directory.GetFiles(path, "*", SearchOption.AllDirectories)) lease.HoldReadLock(file);
+                    }
+                    else if (File.Exists(path)) lease.HoldReadLock(path);
+                }
+                return lease;
+            }
+            catch { lease.Dispose(); throw; }
+        }
+
+        // FILE_ID_INFO binds a captured object independently of mutable content.
+        // See https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PublicationFileIdInfo
+        {
+            public ulong VolumeSerialNumber;
+            public ulong FileIdLow;
+            public ulong FileIdHigh;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass, out PublicationFileIdInfo info, uint size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int informationClass, byte[] info, uint size);
+
+        private static SafeFileHandle OpenPublicationCaptureHandle(string path, bool forRename)
+        {
+            // OPEN_EXISTING, BACKUP_SEMANTICS, OPEN_REPARSE_POINT. A rename
+            // handle requests DELETE but does not share DELETE: another process
+            // cannot replace the identified name while the journal is written.
+            SafeFileHandle handle = CreateFileW(Path.GetFullPath(path), forRename ? 0x10000u : 0u,
+                forRename ? 3u : 7u, IntPtr.Zero, 3u, 0x02200000u, IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new IOException("Cannot identify/capture publication object: " + path, new System.ComponentModel.Win32Exception(error));
+            }
+            return handle;
+        }
+
+        private static string PublicationHandleIdentity(SafeFileHandle handle)
+        {
+            PublicationFileIdInfo info;
+            if (!GetFileInformationByHandleEx(handle, 18, out info, (uint)Marshal.SizeOf(typeof(PublicationFileIdInfo))))
+                throw new IOException("Publication requires filesystem support for FILE_ID_INFO; no unsafe fallback is allowed.",
+                    new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+            return info.VolumeSerialNumber.ToString("x16", CultureInfo.InvariantCulture)
+                + info.FileIdLow.ToString("x16", CultureInfo.InvariantCulture) + info.FileIdHigh.ToString("x16", CultureInfo.InvariantCulture);
+        }
+
+        private static string PublicationFileIdentity(string path)
+        {
+            using (SafeFileHandle handle = OpenPublicationCaptureHandle(path, false)) return PublicationHandleIdentity(handle);
+        }
+
+        private static void RenamePublicationHandle(SafeFileHandle handle, string source, string destination)
+        {
+            if (!EqualsIgnoreCase(Path.GetPathRoot(Path.GetFullPath(source)), Path.GetPathRoot(Path.GetFullPath(destination))))
+                throw new InvalidDataException("Publication capture requires a same-volume rename.");
+            // FILE_RENAME_INFO: zero ReplaceIfExists/RootDirectory, DWORD byte
+            // length, then UTF-16 path. Rename the opened object, never re-open
+            // source by name; an existing destination is NEVER replaced.
+            // https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle
+            byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+            int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+            byte[] buffer = new byte[nameOffset + name.Length + 2];
+            Buffer.BlockCopy(BitConverter.GetBytes(name.Length), 0, buffer, nameOffset - 4, 4);
+            Buffer.BlockCopy(name, 0, buffer, nameOffset, name.Length);
+            if (!SetFileInformationByHandle(handle, 3, buffer, (uint)buffer.Length))
+                throw new IOException("Cannot rename identified publication object from " + source + " to " + destination,
+                    new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+        }
+
+        private static bool IsPublicationCaptureState(string state)
+        {
+            return EqualsIgnoreCase(state, "prepared") || EqualsIgnoreCase(state, "capture-aborted")
+                || state.EndsWith("-prepared", StringComparison.OrdinalIgnoreCase)
+                || state.EndsWith("-backed-up", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void RecoverUnverifiedPublicationCapture(
+            string outDir, string backupDir, Dictionary<string, string> journal)
+        {
+            // In this phase NO new component can have been installed. Validate
+            // all return paths first. Mutable active objects are never removed;
+            // a captured backup may return only to an absent path and only with
+            // its recorded volume/file ID, even if an editor changed its bytes.
+            for (int i = 0; i < PublicationComponentNames.Length; i++)
+            {
+                string backup = Path.Combine(backupDir, PublicationComponentNames[i]);
+                string active = Path.Combine(outDir, PublicationComponentNames[i]);
+                bool exists = Directory.Exists(backup) || File.Exists(backup);
+                string identity = journal[PublicationOldKeys[i] + "CaptureIdentity"];
+                if (!exists)
+                {
+                    // A bound object must still be at its original path if the
+                    // move never happened (or a prior recovery already returned
+                    // it). Missing/replaced evidence must not clear the journal.
+                    if (!string.IsNullOrEmpty(identity)
+                        && (!(PublicationComponentIsDirectory(i) ? Directory.Exists(active) : File.Exists(active))
+                            || !EqualsIgnoreCase(PublicationFileIdentity(active), identity)))
+                        throw new InvalidDataException("Identified publication object is missing from both original and capture paths; transaction evidence was preserved: " + active);
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(identity)
+                    || (PublicationComponentIsDirectory(i) ? !Directory.Exists(backup) : !File.Exists(backup))
+                    || !EqualsIgnoreCase(PublicationFileIdentity(backup), identity)
+                    || Directory.Exists(active) || File.Exists(active))
+                    throw new InvalidDataException("Unverified capture cannot safely return an identified object; active data and backup were preserved: " + backup);
+            }
+            for (int i = 0; i < PublicationComponentNames.Length; i++)
+            {
+                string backup = Path.Combine(backupDir, PublicationComponentNames[i]);
+                if (!Directory.Exists(backup) && !File.Exists(backup)) continue;
+                using (SafeFileHandle handle = OpenPublicationCaptureHandle(backup, true))
+                {
+                    if (!EqualsIgnoreCase(PublicationHandleIdentity(handle), journal[PublicationOldKeys[i] + "CaptureIdentity"]))
+                        throw new InvalidDataException("Captured object identity changed before return; nothing was overwritten: " + backup);
+                    RenamePublicationHandle(handle, backup, Path.Combine(outDir, PublicationComponentNames[i]));
+                }
+            }
         }
 
         private static string PublicationStagingOwnerMarkerPath(string stagingDir, string operation)
@@ -17949,6 +18165,8 @@ namespace OpennessLLM
                 "stagingDir", "installationDir", "backupDir", "packagePath", "packageSha256", "stagingOwnerSha256", "completionResultPath",
                 "oldRootExists", "oldRootSha256", "oldBlocksExists", "oldBlocksSha256",
                 "oldGroupsExists", "oldGroupsSha256", "oldMetadataExists", "oldMetadataSha256",
+                "oldRootCaptureIdentity", "oldBlocksCaptureIdentity", "oldGroupsCaptureIdentity",
+                "oldMetadataCaptureIdentity", "oldMarkerCaptureIdentity",
                 "oldMarkerExists", "oldMarkerSha256", "newRootSha256", "newBlocksSha256",
                 "newGroupsSha256", "newMetadataSha256"
             };
@@ -17968,6 +18186,7 @@ namespace OpennessLLM
                 "before-groups-backed-up", "groups-backed-up",
                 "before-metadata-backed-up", "metadata-backed-up",
                 "before-marker-backed-up", "marker-backed-up",
+                "captured-verified", "capture-aborted",
                 "before-root-installed", "root-installed",
                 "before-blocks-installed", "blocks-installed",
                 "before-groups-installed", "groups-installed",
@@ -18199,6 +18418,14 @@ namespace OpennessLLM
             bool oldMetadata = ParsePublicationJournalExists(journal, "oldMetadata", journalPath);
             bool oldMarker = ParsePublicationJournalExists(journal, "oldMarker", journalPath);
             ValidatePublicationOldStateInvariant(operation, oldRoot, oldBlocks, oldGroups, oldMetadata, oldMarker);
+            for (int i = 0; i < PublicationOldKeys.Length; i++)
+            {
+                string identity = SidecarValue(journal, PublicationOldKeys[i] + "CaptureIdentity");
+                bool existed = ParsePublicationJournalExists(journal, PublicationOldKeys[i], journalPath);
+                if ((!string.IsNullOrEmpty(identity) && (!existed || !Regex.IsMatch(identity, "^[0-9a-fA-F]{48}$")))
+                    || (!IsPublicationCaptureState(state) && existed && string.IsNullOrEmpty(identity)))
+                    throw new InvalidDataException("Publication journal has invalid captured-object identity: " + PublicationOldKeys[i]);
+            }
         }
 
         private static bool ParsePublicationJournalExists(
@@ -18236,6 +18463,22 @@ namespace OpennessLLM
             string state = SidecarValue(journal, "state");
             string stagingDir = Path.GetFullPath(SidecarValue(journal, "stagingDir"));
             string backupDir = Path.GetFullPath(SidecarValue(journal, "backupDir"));
+
+            if (IsPublicationCaptureState(state))
+            {
+                RecoverUnverifiedPublicationCapture(outDir, backupDir, journal);
+                try
+                {
+                    WritePublicationCompletionResult(journal, "not_committed", "capture_aborted",
+                        "Publication stopped before installation; captured user objects were returned without replacing active data. Local edits were not accepted.");
+                }
+                catch (Exception ex) { Console.WriteLine("WARNING: capture abort diagnostic could not be updated: " + ex.Message); }
+                WritePublicationJournal(journalPath, journal, "capture-aborted");
+                File.Delete(journalPath);
+                Console.WriteLine("Aborted unverified " + operation + " capture; local workspace edits were preserved. Run check-clone again.");
+                if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
+                return;
+            }
 
             if (EqualsIgnoreCase(state, "committed"))
             {
@@ -21449,13 +21692,14 @@ namespace OpennessLLM
                             "apply-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff")));
                         try
                         {
-                            applyPublicationCommit = CommitStagedSyncWorkspace(
+                            applyPublicationCommit = CommitStagedSyncWorkspaceBound(
                                 outDir,
                                 validationDir,
                                 applyBackupDir,
                                 "apply-publication",
                                 publicationLease.PackagePath,
                                 publicationLease.PackageSha256,
+                                bundle.WorkspaceRows,
                                 null);
                         }
                         catch (PublicationCommittedDiagnosticException committedDiagnostic)
@@ -29455,6 +29699,11 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-publication-crash-recovery", SelfTestClonePublicationCrashRecovery);
             RunSelfTestCase(results, outDir, "clone-publication-abrupt-process-kill", SelfTestClonePublicationAbruptProcessKill);
             RunSelfTestCase(results, outDir, "clone-publication-kill-during-copy", SelfTestClonePublicationKillDuringCopy);
+            RunSelfTestCase(results, outDir, "clone-publication-preparation-editor-guard", SelfTestPublicationPreparationEditorGuard);
+            RunSelfTestCase(results, outDir, "clone-publication-capture-editor-recovery", SelfTestPublicationCaptureEditorRecovery);
+            RunSelfTestCase(results, outDir, "clone-publication-original-evidence-binding", SelfTestPublicationOriginalEvidenceBinding);
+            RunSelfTestCase(results, outDir, "clone-publication-capture-identity-safety", SelfTestPublicationCaptureIdentitySafety);
+            RunSelfTestCase(results, outDir, "clone-publication-edited-capture-process-kill", SelfTestPublicationEditedCaptureProcessKill);
             RunSelfTestCase(results, outDir, "clone-publication-managed-recovery-retention", SelfTestClonePublicationManagedRecoveryRetention);
             RunSelfTestCase(results, outDir, "apply-publication-locked-completion-finalization", SelfTestApplyPublicationLockedCompletionFinalization);
             RunSelfTestCase(results, outDir, "clone-publication-journal-forgery", SelfTestClonePublicationJournalForgery);
@@ -32520,7 +32769,9 @@ namespace OpennessLLM
             string[] phases =
             {
                 "root-prepared", "blocks-prepared", "groups-prepared", "metadata-prepared",
+                "root-capture-bound", "root-backup-renamed", "blocks-backup-renamed", "groups-backup-renamed", "metadata-backup-renamed", "marker-backup-renamed",
                 "root-backed-up", "blocks-backed-up", "groups-backed-up", "metadata-backed-up", "marker-backed-up",
+                "captured-verified",
                 "root-renamed", "blocks-renamed", "groups-renamed", "metadata-renamed",
                 "root-installed", "blocks-installed", "groups-installed", "metadata-installed"
             };
@@ -32613,6 +32864,157 @@ namespace OpennessLLM
             AssertEqual("not_committed", SidecarValue(applyRolledBackResult, "state"), "recovered apply publication must record not_committed");
         }
 
+        private static void EditSelfTestPublicationSource(string workspace, string edit)
+        {
+            string source = Path.Combine(workspace, "_root", "old.scl");
+            if (edit == "delete") File.Delete(source);
+            else if (edit == "add") WriteTextFile(Path.Combine(workspace, "_root", "editor-added.scl"), "editor-added\n");
+            else if (edit == "replace")
+            {
+                WriteTextFile(source + ".tmp", "editor-replaced\n");
+                File.Delete(source);
+                File.Move(source + ".tmp", source);
+            }
+            else WriteTextFile(source, "concurrent local edit\n");
+        }
+
+        private static void AssertPublicationEditorRejection(
+            string workspace, string operation, string editPhase, string edit, string crashPhase)
+        {
+            string staging, backup;
+            bool edited = false, rejected = false, crashed = false;
+            string expected = null;
+            using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+            {
+                try
+                {
+                    CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256,
+                        delegate(string phase)
+                        {
+                            if (phase == editPhase)
+                            {
+                                EditSelfTestPublicationSource(workspace, edit);
+                                expected = ActivePublicationFingerprint(workspace);
+                                edited = true;
+                            }
+                            if (phase == crashPhase) throw new Exception("stop with editor bytes in unverified capture");
+                        });
+                }
+                catch (PublicationCrashSimulationException) { crashed = true; }
+                catch (InvalidOperationException) { rejected = true; }
+            }
+            AssertTrue(edited && (string.IsNullOrEmpty(crashPhase) ? rejected && !crashed : crashed),
+                "editor mutation must cause rejection/crash, never a successful commit: " + editPhase + "/" + edit);
+            if (crashed)
+            {
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                AssertTrue(File.Exists(journalPath), "unverified capture crash must leave a journal");
+                using (AcquireCloneWorkspaceLock(workspace, "edited-capture-recovery")) { }
+            }
+            AssertEqual(expected, ActivePublicationFingerprint(workspace), "every editor byte/addition/deletion must remain active after rejection/recovery");
+            AssertTrue(!File.Exists(Path.Combine(workspace, PublicationTransactionFileName)), "editor rejection must leave no unfinished journal");
+            AssertTrue(!Directory.Exists(Path.Combine(backup, "_root")), "editor tree must not remain displaced in backup");
+            Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(Path.Combine(backup, "publication-completion.json")), "editor-rejection");
+            AssertEqual("not_committed", completion["state"], "editor rejection is not a commit");
+            if (operation == "sync-clone") CleanupSyncStaging(staging); else CleanupApplyValidationWorkspace(staging);
+            AssertTrue(!Directory.Exists(staging), "finished editor rejection must clean owned staging");
+        }
+
+        private static void SelfTestPublicationPreparationEditorGuard(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+                foreach (string phase in new[] { "root-prepared", "blocks-prepared", "groups-prepared", "metadata-prepared" })
+                    foreach (string edit in new[] { "edit", "add", "delete", "replace" })
+                        AssertPublicationEditorRejection(Path.Combine(caseDir, operation, phase, edit), operation, phase, edit, null);
+        }
+
+        private static void SelfTestPublicationCaptureEditorRecovery(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+                foreach (string edit in new[] { "edit", "add", "delete", "replace" })
+                {
+                    // Changes after the last active check must be rejected from
+                    // the captured tree, or returned safely after a restart.
+                    AssertPublicationEditorRejection(Path.Combine(caseDir, operation, edit, "reject"), operation, "workspace-revalidated", edit, null);
+                    foreach (string crash in new[] { "root-backup-renamed", "root-backed-up", "metadata-backed-up" })
+                        AssertPublicationEditorRejection(Path.Combine(caseDir, operation, edit, crash), operation, "before-root-capture", edit, crash);
+                    AssertPublicationEditorRejection(Path.Combine(caseDir, operation, edit, "prepared-crash"), operation, "root-prepared", edit, "metadata-prepared");
+                }
+        }
+
+        private static void SelfTestPublicationOriginalEvidenceBinding(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation), staging, backup;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    List<Dictionary<string, string>> original = CloneWorkspaceInventoryRows(BuildCloneWorkspaceInventory(workspace));
+                    EditSelfTestPublicationSource(workspace, "edit");
+                    string editorState = ActivePublicationFingerprint(workspace);
+                    bool rejected = false;
+                    try { CommitStagedSyncWorkspaceBound(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, original, null); }
+                    catch (InvalidOperationException) { rejected = true; }
+                    AssertTrue(rejected, "a freshly captured old fingerprint must not replace the ORIGINAL authoritative inventory");
+                    AssertEqual(editorState, ActivePublicationFingerprint(workspace), "pre-entry edit must remain active");
+                }
+                if (operation == "sync-clone") CleanupSyncStaging(staging); else CleanupApplyValidationWorkspace(staging);
+            }
+        }
+
+        private static void SelfTestPublicationCaptureIdentitySafety(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation), staging, backup;
+                string original = null;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    original = ActivePublicationFingerprint(workspace);
+                    try
+                    {
+                        CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256,
+                            delegate(string phase) { if (phase == "root-backup-renamed") throw new Exception("stop before capture journal update"); });
+                    }
+                    catch (PublicationCrashSimulationException) { }
+                }
+                string savedRoot = Path.Combine(backup, "_root");
+                string genuineRoot = Path.Combine(backup, "genuine-root");
+                Directory.Move(savedRoot, genuineRoot);
+                bool rejected = false;
+                try { RecoverIncompletePublication(workspace); } catch (InvalidDataException) { rejected = true; }
+                AssertTrue(rejected && File.Exists(Path.Combine(workspace, PublicationTransactionFileName)), "missing identified capture must retain the journal, not report successful recovery");
+                WriteTextFile(Path.Combine(savedRoot, "old.scl"), "old-root\n");
+                rejected = false;
+                try { RecoverIncompletePublication(workspace); } catch (InvalidDataException) { rejected = true; }
+                AssertTrue(rejected && !Directory.Exists(Path.Combine(workspace, "_root")), "same bytes with a foreign file ID must not authorize restoration");
+                Directory.Move(savedRoot, Path.Combine(backup, "foreign-root"));
+                Directory.Move(genuineRoot, savedRoot);
+
+                WriteTextFile(Path.Combine(workspace, "_root", "editor.scl"), "active collision\n");
+                string activeCollision = ActivePublicationFingerprint(workspace);
+                rejected = false;
+                try { RecoverIncompletePublication(workspace); } catch (InvalidDataException) { rejected = true; }
+                AssertTrue(rejected, "a recreated active root must not be overwritten during capture abort");
+                AssertEqual(activeCollision, ActivePublicationFingerprint(workspace), "conflicting active data must remain untouched");
+                Directory.Move(Path.Combine(workspace, "_root"), Path.Combine(workspace, "preserved-editor-root"));
+                using (AcquireCloneWorkspaceLock(workspace, "capture-identity-retry")) { }
+                AssertEqual(original, ActivePublicationFingerprint(workspace), "identified tree must return once conflict is safely removed");
+            }
+
+            string locked = Path.Combine(caseDir, "handle-lock.txt");
+            WriteTextFile(locked, "identity-bound\n");
+            using (SafeFileHandle handle = OpenPublicationCaptureHandle(locked, true))
+            {
+                string identity = PublicationHandleIdentity(handle);
+                bool renameRejected = false;
+                try { File.Move(locked, locked + ".editor"); } catch (IOException) { renameRejected = true; }
+                AssertTrue(renameRejected, "another name-based rename must fail while the capture handle denies DELETE sharing");
+                RenamePublicationHandle(handle, locked, locked + ".captured");
+                AssertEqual(identity, PublicationFileIdentity(locked + ".captured"), "handle rename must preserve volume/file ID");
+            }
+        }
+
         private static void SelfTestPublicationCrashChild(string cloneDir)
         {
             cloneDir = Path.GetFullPath(cloneDir);
@@ -32625,8 +33027,11 @@ namespace OpennessLLM
             {
                 throw new InvalidOperationException("Internal abrupt-crash child is restricted to a token-bound self-test workspace.");
             }
-            string stagingDir = Path.Combine(cloneDir, "_sync-staging", "run-abrupt-child");
-            string backupDir = Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child");
+            string operation = FirstNonEmpty(Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_CRASH_OPERATION"), "sync-clone");
+            if (operation != "sync-clone" && operation != "apply-publication") throw new InvalidDataException("Invalid self-test operation.");
+            bool sync = operation == "sync-clone";
+            string stagingDir = Path.Combine(cloneDir, sync ? "_sync-staging" : "_apply-validation", "run-abrupt-child");
+            string backupDir = Path.Combine(cloneDir, sync ? "_sync-backups" : "_apply-backups", sync ? "sync-abrupt-child" : "apply-abrupt-child");
             string signalPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-ready");
             string targetPhase = FirstNonEmpty(Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_CRASH_PHASE"), "root-installed");
             using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
@@ -32635,11 +33040,13 @@ namespace OpennessLLM
                     cloneDir,
                     stagingDir,
                     backupDir,
-                    "sync-clone",
+                    operation,
                     lease.PackagePath,
                     lease.PackageSha256,
                     delegate(string phase)
                     {
+                        if (phase == "workspace-revalidated" && Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_EDITOR_MUTATION") == "true")
+                            EditSelfTestPublicationSource(cloneDir, "edit");
                         if (!EqualsIgnoreCase(phase, targetPhase)) return;
                         WriteTextFile(signalPath, "ready\n");
                         FlushFileToDisk(signalPath);
@@ -32661,17 +33068,37 @@ namespace OpennessLLM
 
         private static void SelfTestPublicationKillAtPhase(string caseDir, string phase)
         {
+            SelfTestPublicationKillAtPhase(caseDir, phase, "sync-clone", false);
+        }
+
+        private static void SelfTestPublicationEditedCaptureProcessKill(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+                foreach (string phase in new[] { "root-backup-renamed", "metadata-backed-up" })
+                    SelfTestPublicationKillAtPhase(Path.Combine(caseDir, operation, phase), phase, operation, true);
+        }
+
+        private static void SelfTestPublicationKillAtPhase(string caseDir, string phase, string operation, bool editorMutation)
+        {
+            bool sync = operation == "sync-clone";
             string cloneDir = Path.Combine(caseDir, "self-test-abrupt", "CLONE_PROJECT");
-            string stagingDir = Path.Combine(cloneDir, "_sync-staging", "run-abrupt-child");
+            string stagingDir = Path.Combine(cloneDir, sync ? "_sync-staging" : "_apply-validation", "run-abrupt-child");
+            string backupDir = Path.Combine(cloneDir, sync ? "_sync-backups" : "_apply-backups", sync ? "sync-abrupt-child" : "apply-abrupt-child");
             WriteTextFile(Path.Combine(cloneDir, "_root", "old.scl"), "old-root\n");
             WriteTextFile(Path.Combine(cloneDir, "plc-blocks.csv"), "old-blocks\n");
             WriteTextFile(Path.Combine(cloneDir, "block-groups.csv"), "old-groups\n");
             WriteTextFile(Path.Combine(cloneDir, "_metadata", "old.txt"), "old-metadata\n");
-            WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "old-marker\n");
+            if (sync) WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "old-marker\n");
             string oldState = ActivePublicationFingerprint(cloneDir);
+            if (editorMutation)
+            {
+                EditSelfTestPublicationSource(cloneDir, "edit");
+                oldState = ActivePublicationFingerprint(cloneDir);
+                WriteTextFile(Path.Combine(cloneDir, "_root", "old.scl"), "old-root\n");
+            }
             string token = Guid.NewGuid().ToString("N");
             WriteTextFile(Path.Combine(cloneDir, ".opennessllm-self-test-crash-token"), token + "\n");
-            WritePublicationStagingOwnerMarker(Path.Combine(stagingDir, SyncStagingOwnerMarkerFileName), "sync-clone", "abrupt-process-test");
+            WritePublicationStagingOwnerMarker(PublicationStagingOwnerMarkerPath(stagingDir, operation), operation, "abrupt-process-test");
             string largeContent = new string('X', 256 * 1024);
             WriteTextFile(Path.Combine(stagingDir, "_root", "new.scl"), largeContent);
             WriteTextFile(Path.Combine(stagingDir, "_root", "second.scl"), largeContent);
@@ -32689,6 +33116,8 @@ namespace OpennessLLM
             start.RedirectStandardError = true;
             start.EnvironmentVariables["OPENNESSLLM_SELF_TEST_CRASH_TOKEN"] = token;
             start.EnvironmentVariables["OPENNESSLLM_SELF_TEST_CRASH_PHASE"] = phase;
+            start.EnvironmentVariables["OPENNESSLLM_SELF_TEST_CRASH_OPERATION"] = operation;
+            start.EnvironmentVariables["OPENNESSLLM_SELF_TEST_EDITOR_MUTATION"] = editorMutation ? "true" : "false";
             string signalPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-ready");
             using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
             {
@@ -32724,8 +33153,8 @@ namespace OpennessLLM
             AssertEqual(oldState, ActivePublicationFingerprint(cloneDir), "recovery after an actual process kill must restore every active publication component");
             AssertTrue(!File.Exists(journalPath) && !Directory.Exists(stagingDir), "next command must finish recovery and clean the partial candidate");
             Dictionary<string, string> completion = ParseStrictFlatJsonObject(
-                File.ReadAllText(Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child", "publication-completion.json"), Encoding.UTF8),
-                Path.Combine(cloneDir, "_sync-backups", "sync-abrupt-child", "publication-completion.json"));
+                File.ReadAllText(Path.Combine(backupDir, "publication-completion.json"), Encoding.UTF8),
+                Path.Combine(backupDir, "publication-completion.json"));
             AssertEqual("not_committed", SidecarValue(completion, "state"), "abrupt process recovery must leave an unambiguous not_committed result");
         }
 

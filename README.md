@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.8`. Created by `Zibitpnz`.
+Current version: `0.12.9`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -329,13 +329,24 @@ the owned directory to an audited quarantine when possible. Clone workspace
 paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
 serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
-classification and is never moved as generated content. A strict schema-3
+classification and is never moved as generated content. A strict schema-4
 publication journal binds its owner, canonical workspace, operation, transaction,
 staging owner, immutable package, installation directory, and every old/new
 component fingerprint. The package is fully extracted and verified in a
 transaction-owned directory before any old component is moved to backup. Each
 complete component is then installed by a same-volume rename, so process death
 during extraction cannot leave a partial active `_root`, metadata, or CSV file.
+After preparation, both publishers revalidate against the ORIGINAL authoritative
+workspace inventory. Old objects are captured with Windows handle-based renames
+and journaled volume/file IDs, then the captured tree is checked against that
+same inventory and the original fingerprints under file read leases before any
+new component is installed. Late edits are rejected, not silently accepted as
+a new old-state hash. Before `captured-verified`, recovery returns identified
+captured objects (including editor changes) only to absent original paths;
+untouched active data is never deleted. Missing/replaced capture evidence or a
+recreated active destination stops recovery with both sides retained. Capture
+requires Windows `FILE_ID_INFO` and same-volume handle renames; unsupported
+filesystems fail closed. These filesystem IDs are unrelated to TIA object IDs.
 Recovery validates the complete record and all participating paths before the
 first mutation; an unproven final component is never deleted. Rollback also moves
 proven new components aside atomically before restoring the backup. Cleanup
@@ -354,7 +365,7 @@ revoke the verified apply bundle. If the completion file still says
 next clone command verifies the installed state and updates completion before
 removing the journal/package. Older journal schemas require manual inspection
 with all transaction evidence retained. Bundles from earlier tool/policy versions
-must be refreshed with `check-clone` (current policy: `clone-write-policy-v9`).
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v10`).
 
 The journal and the abrupt-child regression test cover managed failures and
 unexpected process termination while the filesystem state retained by Windows

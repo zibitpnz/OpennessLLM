@@ -483,7 +483,7 @@ allowlist сравниваются с моделью уже под read-lock. Me
 в hash-bound ZIP; commit использует пакет, а не изменяемое дерево staging. Тот же
 контракт применяется к post-save apply validation workspace.
 
-До первого move создаётся `.opennessllm-publication-transaction.json` schema 3.
+До первого move создаётся `.opennessllm-publication-transaction.json` schema 4.
 Его exact contract связывает owner, canonical workspace, operation, transaction
 ID, staging owner, immutable package SHA-256, installation/result paths и все old/new
 fingerprints. Installation path фиксирован как дочерний
@@ -496,6 +496,28 @@ phase. Recovery сначала проверяет весь journal, package, own
 удалить active object, пока его fingerprint не совпал с recorded new state.
 Forged/stale/corrupt record останавливается fail closed с manual-recovery
 diagnostic.
+
+После дорогой подготовки `CommitStagedSyncWorkspaceBound` снова сравнивает active
+workspace с `WorkspaceRows` ИСХОДНОГО bundle, переданного sync/apply caller.
+Затем старые компоненты захватываются через `SetFileInformationByHandle`:
+открытый DELETE handle не разделяет DELETE, journal фиксирует volume serial +
+128-bit file ID до rename. Поэтому переносится именно идентифицированный объект,
+а не возможная подмена имени между чтением identity и `Directory.Move`.
+Источник может измениться между последней сверкой и захватом; до первого install
+весь захваченный backup сверяется с тем же inventory и прежними fingerprints
+под read leases. `old*Sha256` никогда не обновляются для принятия поздней правки.
+
+До барьера `captured-verified` новый baseline ещё не устанавливался. Recovery
+использует отдельный abort capture: сверяет все captured IDs и свободные места
+возврата до мутаций, затем возвращает целиком захваченные объекты с их правками.
+Компонент без backup, но с записанным capture ID, должен оставаться/уже находиться
+по исходному пути с тем же ID. Пропавший или подменённый объект не считается
+восстановленным. Active data никогда не удаляется/перезаписывается этим abort.
+Заново созданный active path требует ручного устранения конфликта с сохранением
+обеих сторон. `capture-aborted` остаётся идемпотентным при повторном recovery.
+После `captured-verified` действует прежняя строгая old/new fingerprint recovery.
+API требует `FILE_ID_INFO` и same-volume rename; unsupported filesystem fail
+closed. Filesystem identity не означает доступность durable TIA object IDs.
 
 Rollback перемещает доказанный новый компонент в принадлежащий транзакции
 `_rollback` и возвращает backup через rename. Это сохраняет возможность повторного

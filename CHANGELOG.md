@@ -4,6 +4,23 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.9 addresses review 0006 of head `0c1846d`. Sync and apply
+  publication repeat the ORIGINAL authoritative workspace check after expensive
+  installation preparation, then validate the captured tree under file read
+  leases before any new installation. Late editor bytes are never authorized
+  by refreshing the old fingerprints.
+- Journal schema 4 records Windows volume/file IDs before handle-based capture
+  renames. Pre-install recovery returns identified captured objects, including
+  concurrent edits, only to absent original paths. It never deletes active data;
+  missing/replaced captures and destination conflicts retain all evidence.
+  Strict old/new fingerprint recovery remains after `captured-verified`.
+  Publication requires filesystem support for FILE_ID_INFO and same-volume
+  handle rename; unsupported filesystems fail closed. Earlier journal schemas
+  require manual inspection; bundle schema remains 7, write policy is v10.
+- Added regressions for edit/add/delete/editor-replace during all preparation
+  phases, the revalidation/capture gap, original-evidence binding, foreign/missing
+  capture IDs, active-path conflicts, and real killed child processes with late
+  edits in captured sync/apply trees. Previous review 0005 tests remain in place.
 - Version 0.12.8 addresses review 0005 of head `32bdb3d`. Publication extracts
   and verifies all components in a transaction-owned installation directory
   before moving the old baseline. Same-volume renames install whole components;
