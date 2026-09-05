@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.9`. Created by `Zibitpnz`.
+Current version: `0.12.10`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -348,8 +348,20 @@ recreated active destination stops recovery with both sides retained. Capture
 requires Windows `FILE_ID_INFO` and same-volume handle renames; unsupported
 filesystems fail closed. These filesystem IDs are unrelated to TIA object IDs.
 Recovery validates the complete record and all participating paths before the
-first mutation; an unproven final component is never deleted. Rollback also moves
-proven new components aside atomically before restoring the backup. Cleanup
+first mutation; an unproven final component is never deleted. Strict rollback
+binds each displaced object to a journaled Windows file ID and renames that
+handle into the transaction backup's permanent `_rollback` directory, outside
+disposable installation staging. Its captured content is checked against the
+recorded new fingerprint under file read leases AFTER the rename, before
+restoring the old component. Edited/missing/replaced/unbound captures stop
+recovery with the journal, old baseline and captured data retained for manual
+inspection; retries check these captures before any further mutation. The
+captures are checked again before finalizing rollback and are NEVER deleted by
+recovery, even when verification succeeds. This retention also protects edits
+made through old editor handles after verification; it does not promise to
+detect edits made after recovery has finished. Inspect and reconcile both
+versions before explicitly removing these backups. Outer staging cleanup also
+retains nested rollback backups after their journal has been consumed. Cleanup
 retains staging, package, and owner marker at their original paths while a
 publication journal remains, including when a temporary I/O error interrupts
 rollback. The next clone
@@ -365,7 +377,8 @@ revoke the verified apply bundle. If the completion file still says
 next clone command verifies the installed state and updates completion before
 removing the journal/package. Older journal schemas require manual inspection
 with all transaction evidence retained. Bundles from earlier tool/policy versions
-must be refreshed with `check-clone` (current policy: `clone-write-policy-v10`).
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v11`,
+publication journal schema `5`, check-bundle schema still `7`).
 
 The journal and the abrupt-child regression test cover managed failures and
 unexpected process termination while the filesystem state retained by Windows

@@ -19,26 +19,26 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.9.0")]
-[assembly: AssemblyFileVersion("0.12.9.0")]
+[assembly: AssemblyVersion("0.12.10.0")]
+[assembly: AssemblyFileVersion("0.12.10.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.9";
-        private const string ProductVersionDate = "2026-09-05";
+        private const string ProductVersion = "0.12.10";
+        private const string ProductVersionDate = "2026-09-06";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "7";
         private const string CloneMatcherRevision = "global-object-correlation-v5";
-        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v10";
+        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v11";
         private const string ApplyStagingOwnerMarkerFileName = ".opennessllm-apply-staging-owner";
         private const string ApplyValidationOwnerMarkerFileName = ".opennessllm-apply-validation-owner";
         private const string SyncStagingOwnerMarkerFileName = ".opennessllm-sync-staging-owner";
         private const string SyncPublicationPackageFileName = ".opennessllm-publication.zip";
         private const string PublicationTransactionFileName = ".opennessllm-publication-transaction.json";
-        private const string PublicationJournalSchemaVersion = "4";
+        private const string PublicationJournalSchemaVersion = "5";
         private const string PublicationOwnerMarkerSchemaVersion = "1";
         private const string PublicationResultSchemaVersion = "1";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
@@ -61,6 +61,9 @@ namespace OpennessLLM
         private static object _tiaPortal;
         [ThreadStatic]
         private static string _activeCloneAuthorizationRefreshAttemptId;
+        // Offline fault injection only; never configured by a production command.
+        [ThreadStatic]
+        private static Action<string> _publicationRecoveryTestHook;
 
         private static int Main(string[] args)
         {
@@ -17588,6 +17591,10 @@ namespace OpennessLLM
                 { "oldGroupsCaptureIdentity", string.Empty },
                 { "oldMetadataCaptureIdentity", string.Empty },
                 { "oldMarkerCaptureIdentity", string.Empty },
+                { "rollbackRootIdentity", string.Empty },
+                { "rollbackBlocksIdentity", string.Empty },
+                { "rollbackGroupsIdentity", string.Empty },
+                { "rollbackMetadataIdentity", string.Empty },
                 { "newRootSha256", PackageComponentFingerprint(packagePath, "_root") },
                 { "newBlocksSha256", PackageFileFingerprint(packagePath, "plc-blocks.csv") },
                 { "newGroupsSha256", PackageFileFingerprint(packagePath, "block-groups.csv") },
@@ -18167,6 +18174,7 @@ namespace OpennessLLM
                 "oldGroupsExists", "oldGroupsSha256", "oldMetadataExists", "oldMetadataSha256",
                 "oldRootCaptureIdentity", "oldBlocksCaptureIdentity", "oldGroupsCaptureIdentity",
                 "oldMetadataCaptureIdentity", "oldMarkerCaptureIdentity",
+                "rollbackRootIdentity", "rollbackBlocksIdentity", "rollbackGroupsIdentity", "rollbackMetadataIdentity",
                 "oldMarkerExists", "oldMarkerSha256", "newRootSha256", "newBlocksSha256",
                 "newGroupsSha256", "newMetadataSha256"
             };
@@ -18425,6 +18433,14 @@ namespace OpennessLLM
                 if ((!string.IsNullOrEmpty(identity) && (!existed || !Regex.IsMatch(identity, "^[0-9a-fA-F]{48}$")))
                     || (!IsPublicationCaptureState(state) && existed && string.IsNullOrEmpty(identity)))
                     throw new InvalidDataException("Publication journal has invalid captured-object identity: " + PublicationOldKeys[i]);
+                if (i < 4)
+                {
+                    string rollbackIdentity = SidecarValue(journal, PublicationRollbackIdentityKey(i));
+                    if (!string.IsNullOrEmpty(rollbackIdentity)
+                        && (!Regex.IsMatch(rollbackIdentity, "^[0-9a-fA-F]{48}$")
+                            || IsPublicationCaptureState(state) || EqualsIgnoreCase(state, "committed")))
+                        throw new InvalidDataException("Publication journal has invalid rollback-object identity: " + PublicationComponentNames[i]);
+                }
             }
         }
 
@@ -18498,6 +18514,9 @@ namespace OpennessLLM
                 }
             }
 
+            // Inspect prior rollback captures BEFORE touching another component.
+            // A retry must not silently bypass an edited or missing saved object.
+            ValidatePublicationRollbackCaptures(journal);
             ValidatePublicationRecoveryComponent(outDir, backupDir, "_root", true, journal, "oldRoot", "newRootSha256");
             ValidatePublicationRecoveryComponent(outDir, backupDir, "plc-blocks.csv", false, journal, "oldBlocks", "newBlocksSha256");
             ValidatePublicationRecoveryComponent(outDir, backupDir, "block-groups.csv", false, journal, "oldGroups", "newGroupsSha256");
@@ -18509,6 +18528,8 @@ namespace OpennessLLM
             RestorePublicationComponent(outDir, backupDir, "block-groups.csv", false, journal, "oldGroups", "newGroupsSha256");
             RestorePublicationComponent(outDir, backupDir, "_metadata", true, journal, "oldMetadata", "newMetadataSha256");
             RestorePublicationComponent(outDir, backupDir, CloneCheckBundleFileName, false, journal, "oldMarker", string.Empty);
+            InvokePublicationCrashHook(_publicationRecoveryTestHook, "rollback-before-final-validation");
+            ValidatePublicationRollbackCaptures(journal);
             if (EqualsIgnoreCase(operation, "apply-publication"))
             {
                 // The TIA project may already have been saved before a local
@@ -18529,7 +18550,7 @@ namespace OpennessLLM
             }
             WritePublicationJournal(journalPath, journal, "rolled-back");
             File.Delete(journalPath);
-            Console.WriteLine("Recovered incomplete " + operation + " transaction " + transactionId + " by restoring the previous clone baseline.");
+            Console.WriteLine("Recovered incomplete " + operation + " transaction " + transactionId + " by restoring the previous clone baseline. Rollback captures, if any, remain for manual inspection in " + Path.Combine(backupDir, "_rollback") + ".");
             if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
         }
 
@@ -18643,6 +18664,7 @@ namespace OpennessLLM
                     {
                         throw new InvalidDataException("Active publication component matches neither recorded old nor transaction-installed new state; manual recovery is required: " + finalPath);
                     }
+                    InvokePublicationCrashHook(_publicationRecoveryTestHook, name + "-before-rollback-capture");
                     DisplacePublicationComponentForRollback(finalPath, name, directory, journal);
                 }
                 if (directory) Directory.Move(backupPath, finalPath); else File.Move(backupPath, finalPath);
@@ -18662,23 +18684,82 @@ namespace OpennessLLM
             {
                 throw new InvalidDataException("Journal cannot prove that the active component was installed by this transaction; no deletion was performed: " + finalPath);
             }
+            InvokePublicationCrashHook(_publicationRecoveryTestHook, name + "-before-rollback-capture");
             DisplacePublicationComponentForRollback(finalPath, name, directory, journal);
         }
 
         private static void DisplacePublicationComponentForRollback(
             string finalPath, string name, bool directory, Dictionary<string, string> journal)
         {
-            // Recursive deletion here would introduce the same partial-component
-            // crash window as extraction into the active tree. Move a proven new
-            // component aside atomically; cleanup occurs only after recovery.
-            string rollbackDir = Path.Combine(SidecarValue(journal, "installationDir"), "_rollback");
-            EnsurePathInside(rollbackDir, SidecarValue(journal, "stagingDir"));
+            // Never put possibly edited data under disposable installation staging.
+            // Retain even verified captures permanently: an editor may hold an old
+            // handle or save after verification. No recovery path deletes them.
+            int index = Array.IndexOf(PublicationComponentNames, name);
+            if (index < 0 || index >= 4 || directory != PublicationComponentIsDirectory(index))
+                throw new InvalidDataException("Unknown rollback component: " + name);
+            string rollbackDir = Path.Combine(SidecarValue(journal, "backupDir"), "_rollback");
+            EnsurePathInside(rollbackDir, SidecarValue(journal, "backupDir"));
+            EnsureExistingTreeHasNoReparsePoints(SidecarValue(journal, "backupDir"), "rollback backup");
             Directory.CreateDirectory(rollbackDir);
             string displaced = Path.Combine(rollbackDir, name);
             if (File.Exists(displaced) || Directory.Exists(displaced))
                 throw new InvalidDataException("Rollback displacement path is already occupied; transaction evidence was retained: " + displaced);
-            if (directory) Directory.Move(finalPath, displaced);
-            else File.Move(finalPath, displaced);
+            using (SafeFileHandle handle = OpenPublicationCaptureHandle(finalPath, true))
+            {
+                string key = PublicationRollbackIdentityKey(index);
+                string identity = PublicationHandleIdentity(handle);
+                if (!string.IsNullOrEmpty(journal[key]) && !EqualsIgnoreCase(journal[key], identity))
+                    throw new InvalidDataException("Pending rollback object was replaced; active data and backup were retained: " + finalPath);
+                journal[key] = identity;
+                WritePublicationJournal(Path.Combine(journal["workspacePath"], PublicationTransactionFileName), journal, journal["state"]);
+                InvokePublicationCrashHook(_publicationRecoveryTestHook, name + "-rollback-capture-bound");
+                RenamePublicationHandle(handle, finalPath, displaced);
+                InvokePublicationCrashHook(_publicationRecoveryTestHook, name + "-rollback-renamed");
+            }
+            // Verify the object actually captured, not a pre-rename pathname.
+            // Release DELETE access before obtaining restrictive file read leases.
+            ValidatePublicationRollbackCaptures(journal);
+            InvokePublicationCrashHook(_publicationRecoveryTestHook, name + "-rollback-verified");
+        }
+
+        private static string PublicationRollbackIdentityKey(int index)
+        {
+            return "rollback" + PublicationOldKeys[index].Substring(3) + "Identity";
+        }
+
+        private static void ValidatePublicationRollbackCaptures(Dictionary<string, string> journal)
+        {
+            string rollbackDir = Path.Combine(journal["backupDir"], "_rollback");
+            if (File.Exists(rollbackDir)) throw new InvalidDataException("Rollback backup has the wrong filesystem type: " + rollbackDir);
+            using (SyncStagingLease lease = LeaseCapturedPublication(rollbackDir))
+            {
+                if (Directory.Exists(rollbackDir)
+                    && Directory.GetFileSystemEntries(rollbackDir).Any(path => !PublicationComponentNames.Take(4).Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)))
+                    throw new InvalidDataException("Unexpected rollback backup data; journal and all versions were retained: " + rollbackDir);
+                for (int i = 0; i < 4; i++)
+                {
+                    string path = Path.Combine(rollbackDir, PublicationComponentNames[i]);
+                    string identity = journal[PublicationRollbackIdentityKey(i)];
+                    bool exists = File.Exists(path) || Directory.Exists(path);
+                    if (!exists)
+                    {
+                        if (string.IsNullOrEmpty(identity)) continue;
+                        // Process death after durable binding but before rename:
+                        // only the same still-active object can resume capture.
+                        string active = Path.Combine(journal["workspacePath"], PublicationComponentNames[i]);
+                        if (!(PublicationComponentIsDirectory(i) ? Directory.Exists(active) : File.Exists(active))
+                            || !EqualsIgnoreCase(PublicationFileIdentity(active), identity))
+                            throw new InvalidDataException("Identified rollback capture is missing; journal and both versions were retained for manual recovery: " + path);
+                        continue;
+                    }
+                    string expectedHash = journal["new" + PublicationOldKeys[i].Substring(3) + "Sha256"];
+                    if (string.IsNullOrEmpty(identity)
+                        || !(PublicationComponentIsDirectory(i) ? Directory.Exists(path) : File.Exists(path))
+                        || !EqualsIgnoreCase(PublicationFileIdentity(path), identity)
+                        || !EqualsIgnoreCase(PublicationPathFingerprint(path, PublicationComponentIsDirectory(i)), expectedHash))
+                        throw new InvalidDataException("Rollback capture changed or contains concurrent editor changes; recovery stopped. Journal, old baseline and captured data were retained for manual recovery: " + path);
+                }
+            }
         }
 
         private static List<CloneWorkspaceFileRecord> ReadPackageFileInventory(string packagePath)
@@ -22550,6 +22631,17 @@ namespace OpennessLLM
                     result.EvidencePath = nested;
                     result.Status = "retained-for-publication-journal";
                     result.Message = "An unfinished nested publication owns this staging tree; no cleanup or quarantine was performed: " + nested;
+                    return true;
+                }
+                // A nested sync may have recovered inside an outer apply staging
+                // workspace. Its permanent backup must not become disposable just
+                // because the nested journal was successfully consumed.
+                string rollback = Directory.GetDirectories(stagingDir, "_rollback", SearchOption.AllDirectories).FirstOrDefault();
+                if (rollback != null)
+                {
+                    result.EvidencePath = rollback;
+                    result.Status = "retained-for-rollback-backup";
+                    result.Message = "Nested rollback captures require manual inspection; no automatic deletion or quarantine was performed: " + rollback;
                     return true;
                 }
                 return false;
@@ -29697,6 +29789,11 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "sync-publication-authoritative-model", SelfTestSyncPublicationAuthoritativeModel);
             RunSelfTestCase(results, outDir, "apply-publication-authoritative-model", SelfTestApplyPublicationAuthoritativeModel);
             RunSelfTestCase(results, outDir, "clone-publication-crash-recovery", SelfTestClonePublicationCrashRecovery);
+            RunSelfTestCase(results, outDir, "clone-publication-rollback-editor-race", SelfTestPublicationRollbackEditorRace);
+            RunSelfTestCase(results, outDir, "clone-publication-rollback-component-races", SelfTestPublicationRollbackComponentRaces);
+            RunSelfTestCase(results, outDir, "clone-publication-rollback-interruption", SelfTestPublicationRollbackInterruption);
+            RunSelfTestCase(results, outDir, "clone-publication-rollback-evidence-safety", SelfTestPublicationRollbackEvidenceSafety);
+            RunSelfTestCase(results, outDir, "clone-publication-rollback-process-kill", SelfTestPublicationRollbackProcessKill);
             RunSelfTestCase(results, outDir, "clone-publication-abrupt-process-kill", SelfTestClonePublicationAbruptProcessKill);
             RunSelfTestCase(results, outDir, "clone-publication-kill-during-copy", SelfTestClonePublicationKillDuringCopy);
             RunSelfTestCase(results, outDir, "clone-publication-preparation-editor-guard", SelfTestPublicationPreparationEditorGuard);
@@ -32864,6 +32961,208 @@ namespace OpennessLLM
             AssertEqual("not_committed", SidecarValue(applyRolledBackResult, "state"), "recovered apply publication must record not_committed");
         }
 
+        private static void SelfTestPublicationRollbackEditorRace(string caseDir)
+        {
+            List<string> failures = new List<string>();
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            foreach (string edit in new[] { "add", "edit", "replace" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", edit);
+                string staging, backup;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    try
+                    {
+                        CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256,
+                            delegate(string phase) { if (phase == "root-installed") throw new Exception("stop before rollback race"); });
+                    }
+                    catch (PublicationCrashSimulationException) { }
+                }
+                bool injected = false, rejected = false;
+                string relative = edit == "add" ? "editor-race.scl" : "new.scl";
+                string payload = "unique rollback editor bytes: " + operation + "/" + edit + "\n";
+                try
+                {
+                    _publicationRecoveryTestHook = delegate(string phase)
+                    {
+                        if (phase != "_root-before-rollback-capture") return;
+                        injected = true;
+                        string source = Path.Combine(workspace, "_root", relative);
+                        if (edit == "replace")
+                        {
+                            WriteTextFile(source + ".tmp", payload);
+                            File.Delete(source);
+                            File.Move(source + ".tmp", source);
+                        }
+                        else WriteTextFile(source, payload);
+                    };
+                    try { using (AcquireCloneWorkspaceLock(workspace, "rollback-editor-race-test")) { } }
+                    catch (InvalidDataException) { rejected = true; }
+                }
+                finally { _publicationRecoveryTestHook = null; }
+                bool preserved = Directory.GetFiles(workspace, relative, SearchOption.AllDirectories)
+                    .Any(path => File.ReadAllText(path, Encoding.UTF8) == payload);
+                bool journalRetained = File.Exists(Path.Combine(workspace, PublicationTransactionFileName));
+                bool stagingRetained = Directory.Exists(staging);
+                Console.WriteLine("Rollback race " + operation + "/" + edit + ": injected=" + injected
+                    + ", editorBytesPreserved=" + preserved + ", conflict=" + rejected
+                    + ", journalRetained=" + journalRetained + ", stagingRetained=" + stagingRetained);
+                if (!injected || !preserved || !rejected || !journalRetained || !stagingRetained)
+                    failures.Add(operation + "/" + edit);
+                else
+                {
+                    AssertEqual(payload, File.ReadAllText(Path.Combine(backup, "_rollback", "_root", relative), Encoding.UTF8), "editor bytes must be outside disposable staging");
+                    AssertEqual("old-root\n", File.ReadAllText(Path.Combine(backup, "_root", "old.scl"), Encoding.UTF8), "old baseline must remain alongside edited capture");
+                    AssertSelfTestRollbackConflictRetained(workspace, staging, backup);
+                }
+            }
+            AssertTrue(failures.Count == 0, "rollback must retain late editor bytes, journal and both versions, not report clean recovery: " + string.Join(", ", failures));
+        }
+
+        private static void CreateSelfTestInterruptedRollback(string workspace, string operation, out string staging, out string backup)
+        {
+            using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+            {
+                try
+                {
+                    CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256,
+                        delegate(string phase) { if (phase == "metadata-installed") throw new Exception("stop for rollback test"); });
+                }
+                catch (PublicationCrashSimulationException) { }
+            }
+            AssertTrue(File.Exists(Path.Combine(workspace, PublicationTransactionFileName)), "fixture must leave a strict journal");
+        }
+
+        private static void AssertSelfTestRollbackConflictRetained(string workspace, string staging, string backup)
+        {
+            string active = ActivePublicationFingerprint(workspace);
+            string saved = DirectoryTreeFingerprint(backup);
+            bool rejected = false;
+            try { using (AcquireCloneWorkspaceLock(workspace, "rollback-conflict-retry")) { } }
+            catch (InvalidDataException) { rejected = true; }
+            AssertTrue(rejected, "retry must reject unresolved rollback evidence");
+            AssertEqual(active, ActivePublicationFingerprint(workspace), "conflict retry must not change active components");
+            AssertEqual(saved, DirectoryTreeFingerprint(backup), "conflict retry must not change either saved version");
+            AssertTrue(File.Exists(Path.Combine(workspace, PublicationTransactionFileName)), "conflict must retain journal");
+            ApplyStagingCleanupResult cleanup = staging.IndexOf("_sync-staging", StringComparison.OrdinalIgnoreCase) >= 0
+                ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging);
+            AssertEqual("retained-for-publication-journal", cleanup.Status, "normal cleanup must preserve conflict evidence");
+            Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(Path.Combine(backup, "publication-completion.json"), Encoding.UTF8), "rollback result");
+            AssertEqual("not_committed", completion["state"], "conflict is never a committed publication");
+            AssertTrue(completion["diagnosticStatus"] != "rolled_back", "unresolved conflict must not report a clean rollback");
+        }
+
+        private static void SelfTestPublicationRollbackComponentRaces(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            for (int i = 0; i < 4; i++)
+            foreach (string edit in new[] { "edit", "replace" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", i.ToString(CultureInfo.InvariantCulture), edit);
+                string staging, backup;
+                CreateSelfTestInterruptedRollback(workspace, operation, out staging, out backup);
+                string name = PublicationComponentNames[i];
+                string relative = PublicationComponentIsDirectory(i) ? Path.Combine(name, i == 0 ? "new.scl" : "new.txt") : name;
+                string payload = "editor bytes in " + name + "/" + edit + "\n";
+                bool injected = false, rejected = false;
+                try
+                {
+                    _publicationRecoveryTestHook = delegate(string phase)
+                    {
+                        if (phase != name + "-before-rollback-capture") return;
+                        injected = true;
+                        string path = Path.Combine(workspace, relative);
+                        if (edit == "replace")
+                        {
+                            WriteTextFile(path + ".tmp", payload);
+                            File.Delete(path);
+                            File.Move(path + ".tmp", path);
+                        }
+                        else WriteTextFile(path, payload);
+                    };
+                    try { using (AcquireCloneWorkspaceLock(workspace, "rollback-component-race")) { } }
+                    catch (InvalidDataException) { rejected = true; }
+                }
+                finally { _publicationRecoveryTestHook = null; }
+                AssertTrue(injected && rejected, "component race must be injected and rejected: " + operation + "/" + name + "/" + edit);
+                AssertEqual(payload, File.ReadAllText(Path.Combine(backup, "_rollback", relative), Encoding.UTF8), "displaced edited component must survive");
+                AssertSelfTestRollbackConflictRetained(workspace, staging, backup);
+            }
+        }
+
+        private static void SelfTestPublicationRollbackInterruption(string caseDir)
+        {
+            string[] phases = { "_root-rollback-capture-bound", "_root-rollback-renamed", "_root-rollback-verified", "rollback-before-final-validation" };
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            for (int i = 0; i < phases.Length; i++)
+            foreach (bool edit in new[] { false, true })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", i.ToString(CultureInfo.InvariantCulture) + (edit ? "e" : "c"));
+                string staging, backup;
+                CreateSelfTestInterruptedRollback(workspace, operation, out staging, out backup);
+                bool crashed = false;
+                try
+                {
+                    _publicationRecoveryTestHook = delegate(string phase)
+                    {
+                        if (phase != phases[i]) return;
+                        if (edit)
+                            WriteTextFile(Path.Combine(i == 0 ? workspace : Path.Combine(backup, "_rollback"), "_root", "editor-race.scl"), "late recovery edit\n");
+                        throw new Exception("process stops during recovery");
+                    };
+                    try { using (AcquireCloneWorkspaceLock(workspace, "rollback-interruption")) { } }
+                    catch (PublicationCrashSimulationException) { crashed = true; }
+                }
+                finally { _publicationRecoveryTestHook = null; }
+                AssertTrue(crashed, "must interrupt rollback at " + phases[i]);
+                if (edit) AssertSelfTestRollbackConflictRetained(workspace, staging, backup);
+                else
+                {
+                    using (AcquireCloneWorkspaceLock(workspace, "rollback-interruption-retry")) { }
+                    AssertEqual("old-root\n", File.ReadAllText(Path.Combine(workspace, "_root", "old.scl"), Encoding.UTF8), "clean interrupted rollback must restore original");
+                    AssertTrue(!File.Exists(Path.Combine(workspace, PublicationTransactionFileName)) && !Directory.Exists(staging), "clean retry must finish staging cleanup");
+                    AssertEqual("new-root\n", File.ReadAllText(Path.Combine(backup, "_rollback", "_root", "new.scl"), Encoding.UTF8), "even verified rollback captures must survive cleanup");
+                }
+            }
+        }
+
+        private static void SelfTestPublicationRollbackEvidenceSafety(string caseDir)
+        {
+            foreach (string variant in new[] { "missing", "foreign", "unbound", "wrong-type", "old-schema", "pending-replaced" })
+            {
+                string workspace = Path.Combine(caseDir, variant);
+                string staging, backup;
+                CreateSelfTestInterruptedRollback(workspace, "sync-clone", out staging, out backup);
+                try
+                {
+                    _publicationRecoveryTestHook = delegate(string phase)
+                    {
+                        if (phase == (variant == "pending-replaced" ? "_root-rollback-capture-bound" : "_root-rollback-renamed"))
+                            throw new Exception("stop before rollback evidence mutation");
+                    };
+                    try { using (AcquireCloneWorkspaceLock(workspace, "rollback-evidence-test")) { } }
+                    catch (PublicationCrashSimulationException) { }
+                }
+                finally { _publicationRecoveryTestHook = null; }
+                string root = variant == "pending-replaced" ? Path.Combine(workspace, "_root") : Path.Combine(backup, "_rollback", "_root");
+                if (variant == "missing" || variant == "foreign" || variant == "wrong-type" || variant == "pending-replaced")
+                {
+                    Directory.Move(root, Path.Combine(workspace, "saved-evidence"));
+                    if (variant == "foreign" || variant == "pending-replaced") WriteTextFile(Path.Combine(root, "new.scl"), "new-root\n");
+                    if (variant == "wrong-type") WriteTextFile(root, "not a directory\n");
+                }
+                else
+                {
+                    string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                    Dictionary<string, string> journal = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
+                    if (variant == "unbound") journal["rollbackRootIdentity"] = string.Empty;
+                    else journal["journalSchemaVersion"] = "4";
+                    WriteFlatJsonObjectAtomically(journalPath, journal);
+                }
+                AssertSelfTestRollbackConflictRetained(workspace, staging, backup);
+            }
+        }
+
         private static void EditSelfTestPublicationSource(string workspace, string edit)
         {
             string source = Path.Combine(workspace, "_root", "old.scl");
@@ -33034,6 +33333,34 @@ namespace OpennessLLM
             string backupDir = Path.Combine(cloneDir, sync ? "_sync-backups" : "_apply-backups", sync ? "sync-abrupt-child" : "apply-abrupt-child");
             string signalPath = Path.Combine(cloneDir, ".opennessllm-self-test-crash-ready");
             string targetPhase = FirstNonEmpty(Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_CRASH_PHASE"), "root-installed");
+            if (targetPhase.StartsWith("rollback:", StringComparison.Ordinal))
+            {
+                string recoveryPhase = targetPhase.Substring("rollback:".Length);
+                using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
+                {
+                    try
+                    {
+                        CommitStagedSyncWorkspace(cloneDir, stagingDir, backupDir, operation, lease.PackagePath, lease.PackageSha256,
+                            delegate(string phase) { if (phase == "root-installed") throw new Exception("stop before child recovery"); });
+                    }
+                    catch (PublicationCrashSimulationException) { }
+                }
+                try
+                {
+                    _publicationRecoveryTestHook = delegate(string phase)
+                    {
+                        if (phase == "_root-before-rollback-capture" && Environment.GetEnvironmentVariable("OPENNESSLLM_SELF_TEST_EDITOR_MUTATION") == "true")
+                            WriteTextFile(Path.Combine(cloneDir, "_root", "editor-race.scl"), "killed rollback editor bytes\n");
+                        if (phase != recoveryPhase) return;
+                        WriteTextFile(signalPath, "ready\n");
+                        FlushFileToDisk(signalPath);
+                        System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+                    };
+                    using (AcquireCloneWorkspaceLock(cloneDir, "killed-rollback-child")) { }
+                }
+                finally { _publicationRecoveryTestHook = null; }
+                throw new InvalidOperationException("Recovery child did not reach the requested kill phase.");
+            }
             using (SyncStagingLease lease = SealSelfTestPublicationStaging(stagingDir))
             {
                 CommitStagedSyncWorkspace(
@@ -33083,10 +33410,21 @@ namespace OpennessLLM
                         phase, operation, true);
         }
 
+        private static void SelfTestPublicationRollbackProcessKill(string caseDir)
+        {
+            string[] phases = { "_root-rollback-capture-bound", "_root-rollback-renamed" };
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            for (int i = 0; i < phases.Length; i++)
+            foreach (bool edit in new[] { false, true })
+                SelfTestPublicationKillAtPhase(Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", i.ToString(CultureInfo.InvariantCulture) + (edit ? "e" : "c")),
+                    "rollback:" + phases[i], operation, edit);
+        }
+
         private static void SelfTestPublicationKillAtPhase(string caseDir, string phase, string operation, bool editorMutation)
         {
             string scenario = operation + "/" + phase;
             bool sync = operation == "sync-clone";
+            bool rollback = phase.StartsWith("rollback:", StringComparison.Ordinal);
             string cloneDir = Path.Combine(caseDir, "self-test-abrupt", "CLONE_PROJECT");
             string stagingDir = Path.Combine(cloneDir, sync ? "_sync-staging" : "_apply-validation", "run-abrupt-child");
             string backupDir = Path.Combine(cloneDir, sync ? "_sync-backups" : "_apply-backups", sync ? "sync-abrupt-child" : "apply-abrupt-child");
@@ -33096,7 +33434,7 @@ namespace OpennessLLM
             WriteTextFile(Path.Combine(cloneDir, "_metadata", "old.txt"), "old-metadata\n");
             if (sync) WriteTextFile(Path.Combine(cloneDir, CloneCheckBundleFileName), "old-marker\n");
             string oldState = ActivePublicationFingerprint(cloneDir);
-            if (editorMutation)
+            if (editorMutation && !rollback)
             {
                 EditSelfTestPublicationSource(cloneDir, "edit");
                 oldState = ActivePublicationFingerprint(cloneDir);
@@ -33144,6 +33482,14 @@ namespace OpennessLLM
             AssertTrue(File.Exists(Path.Combine(cloneDir, PublicationTransactionFileName)), "an actual killed process must leave its strict publication journal");
             string journalPath = Path.Combine(cloneDir, PublicationTransactionFileName);
             Dictionary<string, string> killedJournal = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
+            if (rollback && editorMutation)
+            {
+                AssertSelfTestRollbackConflictRetained(cloneDir, stagingDir, backupDir);
+                AssertTrue(Directory.GetFiles(cloneDir, "editor-race.scl", SearchOption.AllDirectories)
+                    .Any(path => File.ReadAllText(path, Encoding.UTF8) == "killed rollback editor bytes\n"), "real process kill/retry must preserve editor bytes");
+                Console.WriteLine("Verified publication process kill and retained editor conflict: " + scenario);
+                return;
+            }
             if (phase.StartsWith("copying-", StringComparison.Ordinal))
             {
                 string component = phase.Substring("copying-".Length);
@@ -33157,6 +33503,8 @@ namespace OpennessLLM
             }
             using (AcquireCloneWorkspaceLock(cloneDir, "killed-copy-recovery")) { }
             AssertEqual(oldState, ActivePublicationFingerprint(cloneDir), "recovery after an actual process kill must restore every active publication component");
+            if (rollback)
+                AssertTrue(File.Exists(Path.Combine(backupDir, "_rollback", "_root", "new.scl")), "clean killed rollback must retain displaced data outside staging");
             AssertTrue(!File.Exists(journalPath) && !Directory.Exists(stagingDir), "next command must finish recovery and clean the partial candidate");
             Dictionary<string, string> completion = ParseStrictFlatJsonObject(
                 File.ReadAllText(Path.Combine(backupDir, "publication-completion.json"), Encoding.UTF8),
@@ -33364,7 +33712,8 @@ namespace OpennessLLM
                 using (AcquireCloneWorkspaceLock(workspace, "retry-after-unlock")) { }
                 AssertEqual(original, ActivePublicationFingerprint(workspace), "next command must restore the complete old baseline after unlocking: " + variant);
                 AssertTrue(!File.Exists(journalPath) && !Directory.Exists(staging), "successful recovery must clear journal and staging");
-                if (variant == "nested-sync") AssertTrue(CleanupApplyValidationWorkspace(workspace).Removed, "outer cleanup can complete after nested recovery");
+                if (variant == "nested-sync") AssertEqual("retained-for-rollback-backup", CleanupApplyValidationWorkspace(workspace).Status,
+                    "outer cleanup must retain permanent nested rollback captures even after successful recovery");
             }
         }
 

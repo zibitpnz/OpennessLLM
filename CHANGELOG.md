@@ -4,6 +4,24 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.10 addresses review-b1 of head `6c9c593`. A deterministic
+  Windows regression reproduced loss of late editor additions, edits and
+  file replacements during strict rollback, for BOTH sync and apply (six
+  failing scenarios). The prior 105 tests still passed with that failing
+  regression added; this is a reproduced defect, not just a review hypothesis.
+- Strict rollback now records Windows file IDs before handle-based displacement
+  into permanent transaction-backup `_rollback` storage, outside disposable
+  installation staging. Captured contents are verified AFTER the rename under
+  read leases. Conflicts preserve the journal and both versions; retry validates
+  all previous captures first. Even verified captures are retained for manual
+  inspection, including under nested apply staging, never automatically deleted.
+- Journal schema 5 adds rollback capture identities; older journals fail closed
+  for manual inspection. Write policy v11 invalidates earlier authorization;
+  bundle schema remains 7. Regressions cover the exact reviewer race, all four
+  published component kinds, interruption/retry, missing/foreign/unbound capture
+  evidence, real killed recovery processes, and nested cleanup retention.
+  Full self-tests pass 110/110 in both short and review-nested output paths;
+  the previous reviewer's unchanged independent probe also passes 10/10.
 - Review 0007 test-only correction: the edited-capture subprocess fixtures use
   short operation/phase directory codes so atomic owner-marker paths fit when
   self-test output is nested under the repository's reviews directory. Full
