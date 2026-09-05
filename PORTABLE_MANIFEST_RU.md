@@ -3,7 +3,7 @@
 Дата: 2026-08-27.
 
 Имя инструмента: `OpennessLLM`.
-Текущая версия: `0.12.3`.
+Текущая версия: `0.12.4`.
 Создано: `Zibitpnz`.
 Текущая переносимая папка инструмента: `OpennessLLM`.
 
@@ -104,7 +104,7 @@ C:\TIA_HMI_IMPORT_PROBE
 
 ```cmd
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Инструмент больше не генерирует PLC XML для записи в проект.

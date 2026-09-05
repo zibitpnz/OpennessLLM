@@ -347,7 +347,7 @@ See apply-clone-preflight-issues.csv.
 apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
-apply-clone-gates.csv
+apply-clone-gate.csv
 ```
 
 Типовые issue codes:

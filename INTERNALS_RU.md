@@ -404,15 +404,41 @@ write workflow. Он получает export/source blocker status.
 Под капотом:
 
 ```text
-1. Собирает live inventory.
-2. Экспортирует live source для блоков, где это возможно.
-3. Считает live source SHA-256.
-4. Читает clone metadata baseline.
-5. Читает текущие files в CLONE_PROJECT\_root.
-6. Сравнивает baseline, live TIA и clone files.
-7. Пишет clone-check-blocks.csv и clone-check-summary.txt.
-8. Обновляет machine-readable metadata для будущих lookup/gates.
+1. До API resolution/attach берёт workspace lock, пишет durable
+   `clone-check-attempt.json` и аннулирует старый marker.
+2. Получает `TiaPortal.ExclusiveAccess`.
+3. Требует `Project.IsModified=false`, собирает live inventory и экспортирует live
+   source для блоков, где это возможно, не отпуская exclusive lease.
+4. Считает live source SHA-256.
+5. Читает clone metadata baseline.
+6. Читает текущие files в CLONE_PROJECT\_root.
+7. Сравнивает baseline, live TIA и clone files: сначала резервирует равные usable
+   `TiaObjectId`, затем применяет fallback. Разные usable ID и неоднозначный
+   rename+renumber без ID получают отдельные blocking status.
+8. Пишет block/group/source-blocker/workspace-inventory/summary reports во временный staging.
+9. Atomic replace публикует отчёты, затем marker в состоянии `reports-prepared`
+   `clone-check-bundle.json` с schema/run ID, row counts, SHA-256, точным
+   compare directory, normalized project identity, выбранным `SoftwarePath` и
+   хешами всех source/sidecar/manifest/metadata файлов.
+10. Повторно требует clean project и стабильный полный inventory.
+11. Переводит marker в `authoritative-complete` и удаляет attempt sentinel;
+    только затем `apply-clone` / `sync-clone` могут принять bundle.
 ```
+
+Attempt sentinel создаётся до API resolution/attach. Ошибка attach,
+`ExclusiveAccess`, scope, inventory, source export или crash до final commit
+поэтому не может оставить старый либо provisional bundle пригодным для записи.
+Успех без PLC evidence (`status` без PLC или ранний `ExistingWorkspace`) удаляет
+attempt без публикации PLC bundle; прежний bundle остаётся отозванным. Ошибка PLC
+слоя после записи diagnostics снова поднимается наружу и запрещает final commit.
+Immutable snapshot в `%TEMP%` принадлежит lease и удаляется строго; failed cleanup
+завершает команду ошибкой и по возможности карантинируется с audit-файлом.
+
+Если `TiaObjectId` unavailable, невозможно гарантировать continuity исходного
+engineering object для всех комбинаций replacement + rename + renumber +
+существенное изменение source. Matcher блокирует доказуемые shadow/ambiguous
+components, но разрешённый fallback без ID остаётся явно `unproven` и требует
+учёта этого ограничения в safety assessment.
 
 Типовые статусы:
 
@@ -446,6 +472,83 @@ source files under CLONE_PROJECT\_root.
 project-side added block, `sync-clone` должен перенести в baseline полный
 identity record, включая `SoftwarePath`. Начиная с `0.12.2`, это поле
 сохраняется и в `plc-blocks.csv`, и в `_metadata\blocks.jsonl`.
+
+Подписанные workspace/current inputs сначала копируются под read lease в owned
+`_sync-staging\_inputs` и проверяются по size/SHA-256. Из authoritative bundle,
+immutable inputs и фиксированных destination paths строится отдельная expected
+model. Publish-кандидат не может сам назначить себя ожидаемым состоянием:
+source/sidecar, все поля CSV/JSONL, metadata paths и полный file/directory
+allowlist сравниваются с моделью уже под read-lock. Metadata создаётся из строк
+модели, а не перечитывается из mutable CSV. Только затем кандидат запечатывается
+в hash-bound ZIP; commit использует пакет, а не изменяемое дерево staging. Тот же
+контракт применяется к post-save apply validation workspace.
+
+До первого move создаётся `.opennessllm-publication-transaction.json` schema 4.
+Его exact contract связывает owner, canonical workspace, operation, transaction
+ID, staging owner, immutable package SHA-256, installation/result paths и все old/new
+fingerprints. Installation path фиксирован как дочерний
+`_publication-install-<transactionId>` внутри staging. Все компоненты сначала
+распаковываются туда и проверяются до backup старого baseline. Подготовленные
+компоненты устанавливаются целиком через same-volume rename; частичная запись
+никогда не выполняется по активному пути. Journal атомарно обновляется до и после каждой prepare/backup/install
+phase. Recovery сначала проверяет весь journal, package, owner marker, пути и
+состояния всех компонентов без единой мутации. `oldExists=false` не разрешает
+удалить active object, пока его fingerprint не совпал с recorded new state.
+Forged/stale/corrupt record останавливается fail closed с manual-recovery
+diagnostic.
+
+После дорогой подготовки `CommitStagedSyncWorkspaceBound` снова сравнивает active
+workspace с `WorkspaceRows` ИСХОДНОГО bundle, переданного sync/apply caller.
+Затем старые компоненты захватываются через `SetFileInformationByHandle`:
+открытый DELETE handle не разделяет DELETE, journal фиксирует volume serial +
+128-bit file ID до rename. Поэтому переносится именно идентифицированный объект,
+а не возможная подмена имени между чтением identity и `Directory.Move`.
+Источник может измениться между последней сверкой и захватом; до первого install
+весь захваченный backup сверяется с тем же inventory и прежними fingerprints
+под read leases. `old*Sha256` никогда не обновляются для принятия поздней правки.
+
+До барьера `captured-verified` новый baseline ещё не устанавливался. Recovery
+использует отдельный abort capture: сверяет все captured IDs и свободные места
+возврата до мутаций, затем возвращает целиком захваченные объекты с их правками.
+Компонент без backup, но с записанным capture ID, должен оставаться/уже находиться
+по исходному пути с тем же ID. Пропавший или подменённый объект не считается
+восстановленным. Active data никогда не удаляется/перезаписывается этим abort.
+Заново созданный active path требует ручного устранения конфликта с сохранением
+обеих сторон. `capture-aborted` остаётся идемпотентным при повторном recovery.
+После `captured-verified` действует прежняя строгая old/new fingerprint recovery.
+API требует `FILE_ID_INFO` и same-volume rename; unsupported filesystem fail
+closed. Filesystem identity не означает доступность durable TIA object IDs.
+
+Rollback перемещает доказанный новый компонент в принадлежащий транзакции
+`_rollback` и возвращает backup через rename. Это сохраняет возможность повторного
+recovery даже при завершении процесса между этими действиями; рекурсивное
+удаление активного компонента при rollback не применяется. Общая защита внутри
+cleanup helpers сохраняет staging/package/owner marker на исходных путях при
+любом оставшемся journal в родительской цепочке или внутри удаляемого дерева.
+Unreadable/malformed journal также запрещает cleanup и quarantine. Поэтому
+ошибка rollback и последующий внешний catch не уничтожают recovery evidence.
+
+В transaction backup хранится `publication-completion.json`: `not_committed`,
+`committed` или `committed_with_diagnostic_failure`. Поэтому failure финального
+report после commit не требует повторять write или восстанавливать проект.
+`FinalizeCommittedApplyPublication` разделяет authoritative verification и
+диагностику: реальная ошибка verification пробрасывается, а ошибка записи
+completion/after-check report возвращается как diagnostic failure. Во всех
+последующих диагностических шагах сохраняется уже обнаруженная ошибка.
+Заблокированный completion может временно остаться `not_committed`; решение
+`committed` в оставшемся journal имеет приоритет. Recovery проверяет установленные
+компоненты и обновляет completion до удаления journal/package. Для
+`apply-publication` после возможного Save старый authorization marker никогда не
+восстанавливается. Cleanup `_sync-staging` и `_apply-validation` имеет ownership
+marker, quarantine и audit; его ошибка после commit требует только локальной
+confidentiality cleanup, не recovery TIA project.
+
+Journal гарантирует fail-closed recovery после managed failure и abrupt process
+termination, если Windows сохранила filesystem state. Power loss, kernel crash,
+controller cache loss и storage ordering не входят в гарантию: volume-level
+barrier для directory-entry moves/deletes не реализован и VM/volume fault tests
+не проводились. После такого события требуется ручная сверка journal, backup и
+active components, затем свежий authoritative check.
 
 Это важно для:
 
@@ -493,19 +596,32 @@ LLM экономит токены и время;
 Pipeline:
 
 ```text
-1. Собрать live inventory.
-2. Прочитать CLONE_PROJECT baseline и текущие clone files.
-3. Построить apply plan.
-4. Классифицировать операции: update/create/delete/rename/noop/blocker.
-5. Запустить preflight checks.
-6. Записать preflight reports.
-7. Если dry-run, остановиться до TIA writes.
-8. Если --apply, выполнить before-write gates.
-9. Создать backup, если требуется.
-10. Проверить live source drift для изменяемых blocks.
-11. Применить операции через TIA SDK / External Sources.
-12. Запустить post-check reports.
-13. Сохранить проект только при --save и accepted result.
+1. Прочитать и проверить atomic clone-check bundle.
+2. Собрать live inventory и до плана сверить project path/version/object ID и
+   единственный `SoftwarePath` с bundle.
+3. Прочитать CLONE_PROJECT baseline и текущие clone files.
+4. Построить apply plan только для проверенного PlcSoftware.
+5. Классифицировать операции: update/create/delete/rename/noop/blocker.
+6. Запустить preflight checks.
+7. Записать preflight reports.
+8. Под одним `TiaPortal.ExclusiveAccess` проверить dirty-state, полный live
+   pre-state, повторный dirty-state после source export, complete-report safety и
+   immutable source staging также для dry-run. Временный owned pre-state export
+   удалить на любом пути выхода либо fail closed перенести в quarantine с audit.
+9. Если dry-run, остановиться до TIA writes.
+10. Если --apply, выполнить before-write gates.
+11. После gates создать backup внутри ExclusiveAccess; при unsafe dirty override
+    зафиксировать, что filesystem backup не содержит unsaved in-memory state.
+    Вложенный активный clone `--out` исключить из project backup, не отпуская
+    workspace lock; неполную резервную копию удалить и не принимать как backup.
+12. Проверить live source drift для изменяемых blocks.
+13. Применить операции через TIA SDK / External Sources.
+14. Проверить результат в изолированной копии workspace: post-check, staged
+    sync, затем второй полностью чистый post-check.
+15. Перестроить source paths/manifests/metadata только в staging.
+16. Сохранить TIA проект (real apply без --save запрещён).
+17. Транзакционно опубликовать `_root`, manifests и metadata с rollback backup.
+18. Только после save/publish выпустить свежий authorization bundle.
 ```
 
 Ключевые отчеты:
@@ -515,10 +631,12 @@ apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
 apply-clone-summary.txt
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-operations.csv
-_metadata\apply-clone-preflight-plan.jsonl
-_metadata\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-preflight-plan.jsonl
+_apply-reports\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-gate.jsonl
+_apply-reports\apply-clone-operations.jsonl
 ```
 
 ## 14. apply-clone plan: какие операции распознаются
@@ -534,7 +652,7 @@ Noop             Нет изменений.
 Blocked          Небезопасная или неподдержанная ситуация.
 ```
 
-Новые блоки могут задавать metadata через sidecar:
+Новые блоки обязаны задавать metadata через sidecar:
 
 ```text
 MyNewBlock.scl
@@ -551,10 +669,37 @@ autoNumber
 programmingLanguage
 name
 instanceOfName
+softwarePath
+sourceOrigin
 ```
 
-Если sidecar отсутствует, numeric prefix filename может означать manual block
-number.
+Для source, которого нет в `plc-blocks.csv`, безопасное происхождение по
+умолчанию — `unknown-orphaned`. Только точное sidecar-значение
+`sourceOrigin=explicit-new-local-source` подтверждает намеренно добавленный
+новый локальный source, причём в том же валидном flat JSON обязателен непустой
+`softwarePath`. Malformed/nested sidecar, потеря или неполнота manifest не дают
+этого исключения; loose source также не наследует первый software path из manifest.
+
+Это one-shot provenance: `check-clone` сам по совпадению metadata ничего не
+промоутит. Только успешный `CreateBlock` создаёт receipt с check run ID,
+SoftwarePath, target identity, source hash/language и live object identity.
+Экспортированный live source обязан совпасть по language и canonical hash.
+One-to-one batch затем через восстанавливаемый `_manifest-publish` переводит
+sidecar в `tracked-baseline` и публикует manifest. При последующей потере
+manifest такой source становится `unknown-orphaned`, а не снова explicit-new.
+
+`plc-blocks.csv` содержит отдельный durable `SourceOrigin`:
+
+```text
+exported-source                source действительно экспортировался;
+inventory-only-unsupported     source никогда не создавался из-за языка.
+```
+
+Изменение одного mutable `Status` не стирает историю. Legacy или
+противоречивые missing-source строки становятся `unknown-orphaned`.
+
+Если sidecar отсутствует, numeric prefix filename может быть распознан как
+manual number для диагностики, но CreateBlock не разрешается.
 
 ## 15. PLC checks внутри apply-clone
 
@@ -570,10 +715,12 @@ LAD/FBD/GRAPH не подтвержден;
 metadata неполная.
 ```
 
-### Stale source check
+### Complete authoritative pre-state check
 
-Перед real apply инструмент повторно экспортирует live source для изменяемых
-блоков и сравнивает SHA с `CurrentSourceSha256` из последнего `check-clone`.
+Перед real apply инструмент повторно сверяет полный набор и metadata всех
+live blocks/groups и экспортирует source каждого поддерживаемого блока, включая
+не выбранные планом. Каждый SHA сравнивается с `CurrentSourceSha256` из последнего
+`check-clone`. Доступный `TiaObjectId` также обязан совпасть.
 
 Если отличается:
 
@@ -582,6 +729,26 @@ TIA изменился после check-clone;
 clone apply может потереть чужую/ручную правку;
 apply блокируется.
 ```
+
+Если ObjectIdentifierProvider недоступен или возвращает пустой ID, это явно
+фиксируется как `unproven`: логическая identity, metadata и все source hashes
+остаются обязательными. Если ID доступен, Update/Rename обязаны сохранить его,
+Delete — удалить, а Create — получить ID, которого не было в pre-state.
+
+Временные `ExternalSource` удаляются строгим `Delete()`. Ошибка generation и
+cleanup сохраняется как aggregate failure; присутствие временного source после
+Delete или изменение полного ExternalSource set запрещает переход к Save.
+Успешный возврат `GenerateSource` без ожидаемого файла считается export error.
+Каталог свежих source evidence имеет ownership marker. Нужные live bytes
+копируются в immutable staging, после чего каталог строго удаляется до backup и
+первой TIA write; неудачный cleanup переносит его в `_preflight-quarantine` и
+завершает команду без mutation. Outer cleanup остаётся только аварийной защитой
+для сбоев до этой границы и сохраняет primary exception первым. После экспорта
+`Project.IsModified` читается повторно: dirty/unavailable
+блокирует backup и mutation без явного unsafe override.
+Canonical source включает нормализованные комментарии: comment-only edit — это
+изменение документации, а не formatting. Для pure rename ожидаемый source берётся
+из immutable staging свежего pre-write экспорта, а не из mutable `_compare`.
 
 ### Duplicate number check
 
@@ -898,7 +1065,7 @@ clone-check-blocks.csv
 clone-check-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-summary.txt
 ```
 
@@ -975,6 +1142,10 @@ clean-local classification;
 HMI ProjectTexts final gates;
 apply-clone gates;
 canonical source formatting.
+TIA object-ID baseline correlation, global no-ID ambiguity and old-number reuse;
+authorization completion without PLC and failed PLC evidence revocation;
+bundle schema/policy revision rejection; missing GenerateSource output,
+pre-state cleanup-before-write/quarantine, post-export dirty gate.
 ```
 
 Self-test не заменяет real TIA integration run, но быстро ловит регрессии в

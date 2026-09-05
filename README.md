@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.3`. Created by `Zibitpnz`.
+Current version: `0.12.11`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -127,6 +127,11 @@ target:
 .\OpennessLLM\run.cmd status --attach --out .\CLONE_PROJECT --software-path "PLC_1" --hmi-target-path "HMI_1"
 ```
 
+`init-clone` and `check-clone` require exactly one selected `PlcSoftware`; use
+`--software-path` when the project contains more than one PLC. For write safety,
+`apply-clone` currently fails closed if the open project contains multiple
+`PlcSoftware` objects, even when the evidence bundle was created with a filter.
+
 Accept the latest `check-clone` result into `CLONE_PROJECT`:
 
 ```cmd
@@ -136,6 +141,13 @@ Accept the latest `check-clone` result into `CLONE_PROJECT`:
 When `check-clone` reports blocks added directly in TIA Portal, `sync-clone`
 accepts them into both the human CSV view and machine metadata, including
 `SoftwarePath` in `plc-blocks.csv` and `_metadata\blocks.jsonl`.
+The command builds the complete replacement `_root`, manifests, and metadata
+under `_sync-staging` first. Any file/group operation error returns non-zero and
+leaves the current baseline plus its authorization bundle unchanged. Commit
+uses `_sync-backups` and rolls back installed outputs if publication fails.
+Immediately before commit, `sync-clone` revalidates the live workspace inventory;
+accepted added/changed/moved sources receive a normalized `tracked-baseline`
+sidecar so stale one-shot provenance cannot survive the transaction.
 
 Apply changed clone source files back into TIA Portal through External Sources:
 
@@ -153,6 +165,11 @@ API, and delete/recreate can break hidden links. Move blocks manually in TIA
 Portal, then run `check-clone` and `sync-clone` to accept the project-side move
 into the clone.
 
+For a clone-side rename, keep the numeric filename prefix, rename the block in
+the source text, and move the adjacent `.meta.json` sidecar with the source when
+one exists. `check-clone` recognizes the rename only through a unique matching
+PLC/group/type/number identity; an ambiguous match remains blocked.
+
 Instance DB metadata is tracked through the `InstanceOfName` column in
 `plc-blocks.csv` and `clone-check-blocks.csv`. New `.db` files are classified as
 `GlobalDB` or `InstanceDB` from their source text. `apply-clone` keeps Instance
@@ -161,15 +178,25 @@ DB handling conservative: the referenced FB must exist, changing
 sources.
 
 Clone metadata also tracks `AutoNumber`, `NumberMode`, `NumberSpace`, selected
-SDK attributes, and SHA-256 hashes of source files. `apply-clone` refuses to
+SDK attributes, SHA-256 hashes, and durable `SourceOrigin`. The latter records
+whether a source was actually exported (`exported-source`) or was only an
+unsupported-language inventory row (`inventory-only-unsupported`); legacy or
+contradictory missing-source rows fail closed as `unknown-orphaned`.
+`apply-clone` refuses to
 write if a clone source file changed after the latest `check-clone`; run
-`check-clone` again before applying.
+`check-clone` again after every edit, add, delete, rename, sidecar change, or
+manifest change and before applying. A real apply always requires both
+`--apply` and `--save`. It holds TIA Portal `ExclusiveAccess` for the complete
+write/verify/compile/save interval and requires `Project.IsModified=false`
+before writing. The high-friction
+`--i-accept-saving-preexisting-project-changes` option explicitly overrides an
+initial dirty or unavailable state and is recorded as an unsafe audit decision.
 
 `init-clone` and `sync-clone` also write machine-readable metadata under
 `CLONE_PROJECT\_metadata`: `clone-manifest.json`, `blocks.jsonl`,
 `groups.jsonl`, and `schema-version.txt`. The CSV files remain the convenient
 human-readable view; `_metadata` is the versioned machine view for future
-automation.
+automation. The current metadata schema is 4.
 
 Fast PLC block lookup from the local clone metadata:
 
@@ -206,17 +233,189 @@ S7 read ranges used. `plc-runtime-write` is a dry-run unless both `--apply` and
 `--i-know-this-writes-plc` are present. It refuses read-only map rows and rejects
 unsafe output masks above 24 bits for the supported output modules.
 
-`apply-clone` always runs a strict preflight first, including dry-runs. It writes
+`apply-clone` always runs an authoritative preflight first, including dry-runs.
+Both modes hold `TiaPortal.ExclusiveAccess`, require an accepted project dirty
+state, revalidate the complete live block/group/source state, apply the complete
+report gate, and hash-verify immutable source staging. A dry-run stops only after
+those proofs and never invokes a TIA write method. It writes
 `apply-clone-preflight-summary.txt`, `apply-clone-preflight-plan.csv`,
-`apply-clone-preflight-issues.csv`, and JSONL projections under `_metadata`.
+`apply-clone-preflight-issues.csv`, and JSONL projections under
+`_apply-reports` (kept outside the hash-bound baseline `_metadata`).
 If any preflight issue has severity `error`, `--apply` stops before the first
-TIA write. On real `--apply`, the preflight also exports the live TIA source for
-existing blocks that will be changed/renamed/deleted and compares it with
-`CurrentSourceSha256` from the latest `check-clone`; if TIA changed after the
-check, apply is refused.
+TIA write. The preflight revalidates the complete current PLC block/group set
+and metadata, and re-exports every exportable live source,
+including blocks outside the apply plan. Every source hash must still match the
+latest `check-clone`; a saved or unsaved unplanned TIA edit therefore blocks the
+apply before mutation. TIA object identifiers are also required to remain
+continuous whenever the SDK provides them; unavailable identifiers are
+explicitly reported as unproven rather than silently treated as proof.
+Baseline-to-current matching reserves equal usable TIA object identifiers before
+path/name/number fallbacks. A fallback candidate with a different usable ID is
+reported as blocking `object-replaced-or-mismatched`; simultaneous rename and
+renumber with unavailable IDs is blocking `ambiguous-rename-and-renumber`.
+Remaining no-ID number and rename/renumber candidates are evaluated as one
+global graph: a non-bijective component is blocking
+`ambiguous-object-correlation`, so old-number reuse cannot authorize a rename or
+delete plan. A strong path/logical no-ID match is also returned to that graph if
+an unmatched current block has source-equivalent content after normalizing only
+the top-level declaration name. Correlation ambiguity remains blocking even when
+the current visual block cannot be exported, and the candidate list is retained
+in the evidence. If the baseline has a usable TIA object ID but the current run
+cannot prove it, `object-id-continuity-unproven` blocks apply and sync instead of
+erasing the durable identifier.
+The complete pre-state export must actually create every requested source file,
+must leave `Project.IsModified=false` unless the explicit unsafe override is in
+effect. Required live bytes are first copied into immutable staging, then the
+owned export is strictly removed before backup or the first TIA write. Cleanup
+failure is a before-write blocker and quarantines the export with an audit file.
+For a real apply, the filesystem project backup is created under the same
+`ExclusiveAccess` lease after all pre-write gates pass. If the clone workspace
+is inside the project directory, that active `--out` directory is excluded from
+the project backup; its separately versioned/audited clone artifacts are not
+TIA project data, and its held workspace lock must remain active through apply.
+An incomplete backup directory is removed and never reported as a valid backup.
+After backup and immediately before the first TIA mutation, the active workspace
+inventory and every staged raw/canonical digest are checked again. Staged sources
+remain open with read-only sharing while TIA can consume them, and postconditions
+compare the exported result with the digests fixed in the plan rather than
+re-reading a mutable expected file. Owned apply staging is removed after the
+transaction; a committed cleanup failure is a non-recovery warning with an
+audited quarantine path and an explicit local confidentiality-cleanup action.
 
-For new clone-only blocks, an optional sidecar file can be placed next to the
-source file:
+After writing, each action must satisfy its exact block identity, available
+object-ID continuity, and token-stream source postcondition, and the complete
+block/group sets must contain no collateral change. Source comments are part of
+the accepted content contract, so comment-only edits cannot be discarded as
+formatting. Pure rename classification and validation normalize only the
+top-level declaration-name token; all attributes, interfaces, body tokens, and
+comments must remain equivalent. Validation uses an immutable copy of the freshly
+exported pre-write source. Temporary External Sources must be deleted and the
+complete ExternalSource collection must remain stable before saving. Only
+plan-explained formatting, assigned-number, rename, sidecar, and manifest
+transitions may be reconciled. `apply-clone` then compiles
+the broadest supported project/software target and refuses to save on any
+compiler error. Fresh pre-save and post-save inventories must remain clean and
+stable; the durable clone baseline is published only from the post-save snapshot.
+
+`check-clone` publishes `clone-check-blocks.csv`,
+`clone-check-groups.csv`, `clone-check-source-blockers.csv`,
+`clone-check-workspace.csv`, and the summary as
+one evidence bundle committed by `clone-check-bundle.json`. Before API
+resolution or TIA attach, a durable `clone-check-attempt.json` revokes any old
+authorization. Reports first have state `reports-prepared`; only after the outer
+clean-project and fresh-inventory checks does the marker transition to
+`authoritative-complete`, after which the attempt sentinel is removed.
+`apply-clone` and
+`sync-clone` reject a missing/incomplete marker, mismatched run IDs, row counts,
+or SHA-256 hashes. `sync-clone` also uses the exact compare directory named by
+the marker and copies signed current/workspace inputs under read leases into
+owned hash-checked files. The complete publish tree is checked against an exact
+file/directory allowlist, source/sidecar/manifest/metadata cross-references are
+validated under read locks, and commit reads only a hash-bound immutable ZIP
+package. Bundle schema 7 also binds the tool version, matcher revision, write-safety policy,
+normalized TIA project path, project version, stable
+project object identifier when available, the selected `SoftwarePath` set, and
+a sorted inventory of every source, sidecar, manifest, and `_metadata` file.
+`check-clone` holds `TiaPortal.ExclusiveAccess` while collecting the complete
+live inventory, exporting sources, and publishing its marker, and requires a
+saved clean project before and after export. It builds its diff and inventory
+from one immutable local snapshot, cross-checks every clone-source hash, and
+verifies the live workspace again immediately before publishing the marker.
+The old marker is invalidated before authoritative collection starts; attach,
+open, crash, and final-validation failures leave the durable attempt sentinel,
+so no stale or provisional bundle is accepted. Temporary local snapshots are
+lease-owned and deleted strictly; a failed deletion fails the command and moves
+the owned directory to an audited quarantine when possible. Clone workspace
+paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
+serialize through an exclusive `.opennessllm-workspace.lock` file inside the
+workspace; this control file is ignored by `init-workspace --force` backup
+classification and is never moved as generated content. A strict schema-4
+publication journal binds its owner, canonical workspace, operation, transaction,
+staging owner, immutable package, installation directory, and every old/new
+component fingerprint. The package is fully extracted and verified in a
+transaction-owned directory before any old component is moved to backup. Each
+complete component is then installed by a same-volume rename, so process death
+during extraction cannot leave a partial active `_root`, metadata, or CSV file.
+After preparation, both publishers revalidate against the ORIGINAL authoritative
+workspace inventory. Old objects are captured with Windows handle-based renames
+and journaled volume/file IDs, then the captured tree is checked against that
+same inventory and the original fingerprints under file read leases before any
+new component is installed. Late edits are rejected, not silently accepted as
+a new old-state hash. Before `captured-verified`, recovery returns identified
+captured objects (including editor changes) only to absent original paths;
+untouched active data is never deleted. Missing/replaced capture evidence or a
+recreated active destination stops recovery with both sides retained. Capture
+requires Windows `FILE_ID_INFO` and same-volume handle renames; unsupported
+filesystems fail closed. These filesystem IDs are unrelated to TIA object IDs.
+Recovery validates the complete record and all participating paths before the
+first mutation; an unproven final component is never deleted. Strict rollback
+binds each displaced object to a journaled Windows file ID and renames that
+handle into the transaction backup's permanent `_rollback` directory, outside
+disposable installation staging. Its captured content is checked against the
+recorded new fingerprint under file read leases AFTER the rename, before
+restoring the old component. Edited/missing/replaced/unbound captures stop
+recovery with the journal, old baseline and captured data retained for manual
+inspection; retries check these captures before any further mutation. The
+captures are checked again before finalizing rollback and are NEVER deleted by
+recovery, even when verification succeeds. This retention also protects edits
+made through old editor handles after verification; it does not promise to
+detect edits made after recovery has finished. Inspect and reconcile both
+versions before explicitly removing these backups. Outer staging cleanup also
+retains nested rollback backups after their journal has been consumed. Cleanup
+retains staging, package, and owner marker at their original paths while a
+publication journal remains, including when a temporary I/O error interrupts
+rollback. The next clone
+command deterministically restores an interrupted transaction before other
+work, and a recovered post-save apply never resurrects its pre-apply
+authorization marker. Each publication backup contains
+`publication-completion.json` with one of the durable states `not_committed`,
+`committed`, or `committed_with_diagnostic_failure`, so a failed optional report
+write cannot make an already committed operation look safe to repeat. A locked
+completion file is also a diagnostic failure after verified commit and does not
+revoke the verified apply bundle. If the completion file still says
+`not_committed`, a retained journal with `state=committed` takes precedence; the
+next clone command verifies the installed state and updates completion before
+removing the journal/package. A failure reopening the journal for flush after
+its atomic replacement does not prove that commit failed. Recovery distinguishes
+verified commit, completed rollback, aborted capture, and unresolved outcome from
+the ON-DISK journal and component verification, never the in-memory state alone.
+A verified commit returns through the committed-diagnostic caller branch; apply
+still runs its mandatory post-commit verification. Original I/O diagnostics are
+preserved even if later completion/report writes fail too. An unreadable journal
+or failed installed-state verification remains unresolved, with evidence retained,
+not a claimed rollback or successful commit. Mandatory recovery at command entry
+blocks new work while a previous transaction's completion cannot be finalized.
+Older journal schemas require manual inspection
+with all transaction evidence retained. Bundles from earlier tool/policy versions
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v12`,
+publication journal schema `5`, check-bundle schema still `7`).
+
+The journal and the abrupt-child regression test cover managed failures and
+unexpected process termination while the filesystem state retained by Windows
+remains available. They do not claim power-loss, kernel-crash, controller-cache,
+or storage-device ordering guarantees: directory entry moves/deletes have no
+explicit volume-level durability barrier in this implementation. After such a
+system/storage event, inspect the journal, publication backup, and active
+components and run a fresh authoritative check instead of assuming automatic
+recovery is sufficient.
+`init-workspace` and the bundle-producing PLC portion of `status` / `check-all`
+use the same authoritative lease and clean-project rules. A successful command
+that found no selected PLC software, or `init-workspace` returning
+`ExistingWorkspace` before a PLC check, closes the refresh attempt without
+creating PLC authorization and keeps any previous PLC bundle revoked. A PLC
+evidence failure remains a command failure even after status diagnostics have
+been written; provisional evidence is never promoted.
+`apply-clone` validates all of these against the open project before constructing
+a plan or invoking any TIA write method. Any pre-schema-7 or mismatched-policy bundle must be
+refreshed by running `check-clone` again.
+
+When `TiaObjectId` is unavailable, no implementation can prove engineering-object
+continuity for every combination of replacement plus rename, renumber, and
+substantial source edits. OpennessLLM blocks ambiguous/source-equivalent shadow
+cases and reports the remaining permitted logical match as explicitly
+`unproven`; operators must retain this limitation in their safety assessment.
+
+Every new clone-only block must have a sidecar file next to the source file:
 
 ```text
 MyNewBlock.scl
@@ -224,10 +423,41 @@ MyNewBlock.scl.meta.json
 ```
 
 Supported flat sidecar fields are `blockKind`, `numberMode`, `number`,
-`autoNumber`, `programmingLanguage`, `name`, and `instanceOfName`. When a
-sidecar exists, it wins over the filename numeric prefix. Without a sidecar,
-the old shorthand still works: a numeric prefix on a clone-only filename means
-"request this manual block number".
+`autoNumber`, `programmingLanguage`, `name`, `instanceOfName`, `softwarePath`,
+and `sourceOrigin`. The sidecar wins over the filename numeric prefix and must
+contain nonempty `softwarePath` plus
+`"sourceOrigin":"explicit-new-local-source"`. A filename numeric prefix alone
+does not authorize creation.
+Loose `unknown-orphaned` sources are never authorized to update or rename an
+existing TIA block. `UpdateSource`, `RenameBlock`, and
+`RenameAndUpdateSource` require `tracked-baseline`; intentional adoption or
+recovery must go through `sync-clone` or a separate explicit workflow.
+
+A source discovered outside `plc-blocks.csv` has fail-closed
+`unknown-orphaned` provenance. To assert that it is intentionally new local
+input, set `"sourceOrigin":"explicit-new-local-source"` in its sidecar; this is
+the only loose-source origin that receives the new-block exemption from the
+ambiguous visual-block gate. A nonempty `softwarePath` in the same valid flat
+JSON sidecar is required; malformed/nested metadata or invalid JSON escapes
+remain `unknown-orphaned`. This origin is one-shot: only a successful
+`CreateBlock` operation can issue a promotion receipt. The receipt binds the
+check run, selected PLC, target identity, source hash, language, and resulting
+live object; promotion additionally requires an exportable live source with the
+same canonical content (formatting-only differences are allowed). A
+pre-existing same-identity block is not adopted.
+Whitespace-only formatting may differ, but comments are significant canonical
+content and must match.
+The recoverable `_manifest-publish` transaction rewrites the sidecar origin to
+`tracked-baseline` and publishes the manifest as one transition. Recovery
+validates the complete journal, staged manifest, sources, identities, and every
+sidecar before consuming any sidecar. A direct `init-clone` rerun finishes this
+recovery before invalidating the current bundle or writing a new baseline, so a
+stale staged manifest cannot later replace the reinitialized manifest. If that
+row is later lost, the consumed sidecar becomes `unknown-orphaned` instead of
+receiving the new-block exemption again. Delete preflight distinguishes an
+untracked TIA-only block from a tracked missing-source block and proves the exact
+manifest row to consume before any TIA write; only the latter row is removed
+after a successful deletion.
 
 When the project is already open in TIA Portal, use `--attach`:
 
@@ -268,8 +498,12 @@ PLC source edits should go through the guarded clone workflow:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --out .\CLONE_PROJECT --apply --save
 ```
+
+The real `apply-clone` command performs the broadest SDK-supported compile after
+post-write verification and before saving. The standalone compile commands below
+remain useful for diagnostics and for changes made outside the clone workflow.
 
 Compile one PLC block and print recursive TIA compiler diagnostics:
 

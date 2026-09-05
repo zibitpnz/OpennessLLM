@@ -1,6 +1,6 @@
 # OpennessLLM Command Reference
 
-Версия инструмента: `0.12.3`.
+Версия инструмента: `0.12.4`.
 
 Создано: `Zibitpnz`.
 
@@ -27,7 +27,7 @@ Probe/copy-only Пишут только во временную копию пр�
 Write           Могут изменить TIA проект, требуют явный --apply.
 ```
 
-Write-команды TIA-проекта в версии `0.12.3`:
+Write-команды TIA-проекта в версии `0.12.4`:
 
 ```text
 apply-clone
@@ -479,6 +479,56 @@ duplicate/move screen items. Если операция не поддержана
 Команда не открывает TIA Portal. Ее нужно запускать только после осознанного
 `check-clone`, когда текущее состояние проекта считается правильным baseline.
 
+`sync-clone` сначала копирует подписанные workspace/current source в owned
+immutable inputs под read lease и проверяет hashes. Из authoritative bundle и
+этих inputs строится фиксированная expected model. Полный кандидат `_root`,
+manifests и metadata в `_sync-staging` проверяется по exact inventory и полному
+равенству всех manifest/JSONL полей под read-lock, затем запечатывается в
+hash-bound ZIP. Commit читает только этот пакет.
+
+Publication journal schema 4 строго связывает canonical workspace, operation,
+transaction ID, staging owner, package SHA-256, installation directory и old/new
+fingerprints. Распаковка и проверка всех компонентов завершаются во временном
+каталоге транзакции до перемещения старого baseline в backup. Установка каждого
+готового компонента выполняется переименованием на том же томе. Recovery
+сначала проверяет весь контракт без изменений; неподтверждённый active component
+не удаляется. В backup записывается `publication-completion.json` со state
+`not_committed`, `committed` или `committed_with_diagnostic_failure`. Поэтому
+ошибка финального CSV/TXT после commit не означает, что write нужно повторять.
+
+После подготовки active workspace повторно сверяется с ИСХОДНЫМ authoritative
+inventory. Старые объекты перемещаются по открытым Windows handles; journal
+фиксирует volume/file IDs до каждого rename. Уже захваченное дерево ещё раз
+сверяется с исходным inventory/fingerprints под read leases до установки нового.
+Правка в промежутке вызывает отказ, а не обновление разрешённых old hashes.
+До `captured-verified` recovery возвращает идентифицированные объекты вместе с
+поздними правками только на отсутствующие исходные пути. Чужой/пропавший backup
+или заново созданный active path останавливают recovery с сохранением evidence,
+без перезаписи пользовательских данных. После отказа нужен новый `check-clone`.
+Требуются Windows `FILE_ID_INFO` и same-volume rename по handle; без поддержки
+файловой системы операция запрещена. Это filesystem IDs, не TIA object IDs.
+
+Если временная блокировка прервала rollback, cleanup сохраняет staging, ZIP и
+owner marker по исходным путям до завершения восстановления. Это действует и
+для вложенного sync внутри apply validation. Во время rollback новый компонент
+также перемещается целиком во временный каталог, затем возвращается backup.
+
+Заблокированный `publication-completion.json` после подтверждённого commit
+считается ошибкой диагностики; успешно проверенный apply bundle не отзывается.
+При расхождении с устаревшим completion-файлом решение `state=committed` в
+сохранённом журнале имеет приоритет. Следующая clone-команда проверит baseline,
+допишет completion и только затем освободит journal/package. Старые schema
+журнала требуют ручного разбора с сохранением всех файлов транзакции.
+Текущая версия `0.12.9`, write policy `clone-write-policy-v10`; старый bundle нужно
+обновить через `check-clone`.
+
+Эта гарантия проверена для managed failure и внезапного завершения процесса при
+сохранённом Windows filesystem state. Она не является гарантией упорядоченности
+при отключении питания, kernel crash или потере controller/storage cache: код не
+устанавливает volume-level durability barrier для directory moves/deletes. После
+такого события нужны ручная сверка journal/backup/active components и новый
+authoritative check.
+
 Начиная с `0.12.2`, если `check-clone` нашел новый блок, созданный в TIA Portal,
 `sync-clone` сохраняет для него `SoftwarePath` и в `plc-blocks.csv`, и в
 `CLONE_PROJECT\_metadata\blocks.jsonl`. Это важно для последующих lookup/gates и
@@ -550,6 +600,11 @@ CLONE_PROJECT\tool-status-summary.txt
 ```
 
 `check-all` является alias для `status`.
+
+Если выбранный проект не содержит PLC, PLC layer имеет `not-present`, команда
+успешно завершает authoritative refresh без `clone-check-bundle.json` и не
+восстанавливает прежнюю PLC-авторизацию. Ошибка PLC clone/evidence остаётся
+ошибкой процесса даже после записи `tool-status-*` diagnostics.
 
 Что делает:
 
@@ -639,7 +694,12 @@ inventory.json
 CLONE_PROJECT\_root\...
 CLONE_PROJECT\plc-blocks.csv
 CLONE_PROJECT\clone-check-blocks.csv
+CLONE_PROJECT\clone-check-groups.csv
+CLONE_PROJECT\clone-check-source-blockers.csv
+CLONE_PROJECT\clone-check-workspace.csv
 CLONE_PROJECT\clone-check-summary.txt
+CLONE_PROJECT\clone-check-bundle.json
+CLONE_PROJECT\clone-check-attempt.json (только пока authoritative refresh не завершён)
 CLONE_PROJECT\_metadata\clone-manifest.json
 CLONE_PROJECT\_metadata\blocks.jsonl
 CLONE_PROJECT\_metadata\groups.jsonl
@@ -662,16 +722,57 @@ unchanged
 changed
 added
 removed
+object-replaced-or-mismatched
+ambiguous-rename-and-renumber
+ambiguous-object-correlation
 source-blocker
 unsupported
 ```
 
 Перед любым `apply-clone --apply` нужно иметь свежий `check-clone`.
+Его нужно запускать после правки, добавления, удаления или rename source/sidecar.
+Текущий bundle schema 7 привязан к версии инструмента, matcher/write-safety
+policy, normalized project path, версии проекта,
+стабильному project object ID при доступности и выбранному `SoftwarePath`.
+Он также фиксирует полный список и SHA-256 source, sidecar, manifest и metadata
+файлов. Diff и inventory создаются из одного immutable snapshot, затем live
+workspace сверяется непосредственно перед marker publication. Bundle от другого
+проекта или старой schema отклоняется до apply plan. Clone-команды держат
+эксклюзивный `.opennessllm-workspace.lock` внутри workspace.
+Перед API resolution/attach создаётся `clone-check-attempt.json`; пока он
+существует, старый или provisional bundle не разрешает `sync-clone`/`apply-clone`.
+После финальной проверки принимается только state `authoritative-complete`.
+Junction/symlink/reparse point внутри workspace отклоняется fail closed.
+`check-clone` теперь является авторитетной snapshot-операцией: он требует
+`Project.IsModified=false` и держит `TiaPortal.ExclusiveAccess` от сбора полного
+live inventory до экспорта всех source и публикации marker. Старый marker
+аннулируется до начала этого сбора; любая ошибка оставляет bundle непригодным для
+записи. Временный immutable snapshot удаляется и при успехе, и при исключении.
+Equal usable `TiaObjectId` резервирует baseline/current пару до всех fallback.
+Разные usable ID у fallback-кандидата и rename+renumber при недоступном ID
+блокируют apply отдельными статусами выше.
 
 ### apply-clone
 
 Основной PLC write workflow. Применяет изменения source files из
 `CLONE_PROJECT` обратно в TIA Portal через External Sources.
+
+Для безопасности write-target не выбирается как «первый PLC». `apply-clone`
+требует, чтобы открытый проект содержал ровно один `PlcSoftware`; multi-PLC
+проект сейчас отклоняется fail closed. `init-clone`/`check-clone` можно
+ограничить одним PLC через `--software-path`.
+
+Delete preflight различает TIA-only блок и tracked блок с удалённым clone
+source. Для tracked deletion исходная manifest identity и ровно одна строка
+проверяются до первой TIA-записи; TIA-only deletion не требует строку manifest.
+Pending `explicit-new-local-source` разрешает только `CreateBlock`. Он становится
+tracked лишь по receipt успешного создания и совпадению экспортированного live
+source по language/canonical hash; существующий одноимённый блок не принимается
+автоматически.
+
+Для clone-only source обязателен валидный flat JSON sidecar с непустым
+`softwarePath` и `sourceOrigin=explicit-new-local-source`. Filename prefix без
+sidecar не является разрешением на создание.
 
 Dry-run:
 
@@ -679,12 +780,55 @@ Dry-run:
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
+Это authoritative rehearsal: он держит `TiaPortal.ExclusiveAccess`, требует
+допустимый dirty-state, перепроверяет полный live pre-state и complete report,
+а также создаёт и проверяет immutable staging. TIA write methods не вызываются.
+
 Реальное применение:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
+
+Реальный `--apply` без `--save` отклоняется до первой TIA-записи. Фильтры
+`--name`/`--group` также отклоняются, если в том же свежем bundle остаются
+другие dirty rows: частичный apply не может пройти глобальную post-check.
+
+Real apply держит `TiaPortal.ExclusiveAccess` от preflight до post-save snapshot.
+Project backup создаётся внутри этого lease после успешных pre-write gates и до
+первой мутации. При unsafe dirty override filesystem backup не включает уже
+существующие unsaved in-memory изменения; это явно фиксируется в audit.
+Если текущий `--out` находится внутри каталога TIA-проекта, активный clone
+workspace исключается из project backup: его workspace lock остаётся удержанным,
+а clone-артефакты не являются файлами TIA-проекта. Неполный backup удаляется и
+не выдаётся за успешно созданный.
+По умолчанию он требует `Project.IsModified=false`; иначе выдаётся
+`PROJECT_DIRTY_BEFORE_APPLY`. Опасное исключение
+`--i-accept-saving-preexisting-project-changes` явно разрешает сохранить уже
+существовавшие несохранённые изменения и фиксируется в audit.
+
+До первой записи полный block/group report допускает только `unchanged`, все
+actionable rows из immutable plan и доказанные informational current-only rows.
+Кроме этого, в той же `ExclusiveAccess`-сессии повторно сверяются полный набор и
+metadata всех live blocks/groups, а также SHA-256 каждого экспортируемого source,
+включая блоки вне плана. Доступные TIA object IDs обязаны совпасть; отсутствие ID
+явно отражается warning-состоянием `unproven`. Временный `ExternalSource` удаляется
+строго: ошибка `Delete()` или остаток в коллекции запрещает `SaveProject`.
+`GenerateSource` без ожидаемого файла является ошибкой. После полного экспорта
+повторно проверяется `Project.IsModified`; dirty/unavailable блокирует backup и
+mutation без unsafe override. После immutable staging owned
+`_preflight\authoritative-*` строго удаляется до backup и первой TIA write;
+cleanup failure карантинируется и завершает команду с явным no-mutation
+before-write результатом.
+После записи проверяются точные postconditions каждого Create/Update/Rename/Delete,
+полный состав blocks/groups, доступная object-ID continuity и language-aware
+SCL/STL token stream. Комментарии входят в canonical content, поэтому
+comment-only правка не считается formatting. Pure rename сравнивается с
+immutable-копией свежего pre-write экспорта. Reconciliation
+ограничена ожидаемыми formatting/assigned-number/rename/sidecar/manifest
+переходами. Затем `apply-clone` запускает самый широкий доступный compile,
+требует zero errors, получает свежие clean pre-save и post-save snapshots,
+сохраняет TIA и только потом transactionally публикует durable baseline.
 
 Поддерживает:
 
@@ -715,10 +859,12 @@ apply-clone-preflight-summary.txt
 apply-clone-preflight-plan.csv
 apply-clone-preflight-issues.csv
 apply-clone-summary.txt
-apply-clone-gates.csv
+apply-clone-gate.csv
 apply-clone-operations.csv
-_metadata\apply-clone-preflight-plan.jsonl
-_metadata\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-preflight-plan.jsonl
+_apply-reports\apply-clone-preflight-issues.jsonl
+_apply-reports\apply-clone-gate.jsonl
+_apply-reports\apply-clone-operations.jsonl
 ```
 
 ## 7. PLC export and diagnostics
@@ -735,6 +881,8 @@ _metadata\apply-clone-preflight-issues.jsonl
 
 Команда полезна для точечного debug, но основной baseline лучше вести через
 `init-clone`/`check-clone`.
+Возврат SDK без фактически созданного ожидаемого файла выводится как `error`, а
+не как успешный export.
 
 ### export-xml
 
