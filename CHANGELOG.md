@@ -4,6 +4,14 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Review 0007 test-only correction: the edited-capture subprocess fixtures use
+  short operation/phase directory codes so atomic owner-marker paths fit when
+  self-test output is nested under the repository's reviews directory. Full
+  scenario names remain in readiness errors and successful recovery diagnostics.
+  Production publication/recovery code, version, policy and journal schema are
+  unchanged; no global Windows long-path setting is required.
+  Full self-tests pass 105/105 in both short and review-nested output directories;
+  all four edited-capture operation/phase combinations reach kill and recovery.
 - Version 0.12.9 addresses review 0006 of head `0c1846d`. Sync and apply
   publication repeat the ORIGINAL authoritative workspace check after expensive
   installation preparation, then validate the captured tree under file read

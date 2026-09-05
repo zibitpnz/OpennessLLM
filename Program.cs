@@ -33073,13 +33073,19 @@ namespace OpennessLLM
 
         private static void SelfTestPublicationEditedCaptureProcessKill(string caseDir)
         {
+            // Keep physical fixture paths short: atomic owner-marker writes add
+            // a GUID plus .tmp.previous below the subprocess staging directory.
+            // Full operation/phase labels remain in the helper's diagnostics.
             foreach (string operation in new[] { "sync-clone", "apply-publication" })
                 foreach (string phase in new[] { "root-backup-renamed", "metadata-backed-up" })
-                    SelfTestPublicationKillAtPhase(Path.Combine(caseDir, operation, phase), phase, operation, true);
+                    SelfTestPublicationKillAtPhase(
+                        Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", phase == "root-backup-renamed" ? "r" : "m"),
+                        phase, operation, true);
         }
 
         private static void SelfTestPublicationKillAtPhase(string caseDir, string phase, string operation, bool editorMutation)
         {
+            string scenario = operation + "/" + phase;
             bool sync = operation == "sync-clone";
             string cloneDir = Path.Combine(caseDir, "self-test-abrupt", "CLONE_PROJECT");
             string stagingDir = Path.Combine(cloneDir, sync ? "_sync-staging" : "_apply-validation", "run-abrupt-child");
@@ -33130,7 +33136,7 @@ namespace OpennessLLM
                 {
                     string error = process.HasExited ? process.StandardError.ReadToEnd() : "child did not reach the crash phase";
                     if (!process.HasExited) process.Kill();
-                    throw new InvalidOperationException("Abrupt publication child did not become ready: " + error);
+                    throw new InvalidOperationException("Abrupt publication child did not become ready (" + scenario + "): " + error);
                 }
                 process.Kill();
                 process.WaitForExit();
@@ -33156,6 +33162,7 @@ namespace OpennessLLM
                 File.ReadAllText(Path.Combine(backupDir, "publication-completion.json"), Encoding.UTF8),
                 Path.Combine(backupDir, "publication-completion.json"));
             AssertEqual("not_committed", SidecarValue(completion, "state"), "abrupt process recovery must leave an unambiguous not_committed result");
+            Console.WriteLine("Verified publication process kill and recovery: " + scenario);
         }
 
         private static Dictionary<string, string> CreateSelfTestRecoveredPublicationJournal(
