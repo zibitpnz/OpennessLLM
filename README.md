@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.7`. Created by `Zibitpnz`.
+Current version: `0.12.8`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -329,17 +329,32 @@ the owned directory to an audited quarantine when possible. Clone workspace
 paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
 serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
-classification and is never moved as generated content. A strict publication
-journal binds its owner, schema, canonical workspace, operation, transaction,
-staging owner, immutable package, and every old/new component fingerprint.
+classification and is never moved as generated content. A strict schema-3
+publication journal binds its owner, canonical workspace, operation, transaction,
+staging owner, immutable package, installation directory, and every old/new
+component fingerprint. The package is fully extracted and verified in a
+transaction-owned directory before any old component is moved to backup. Each
+complete component is then installed by a same-volume rename, so process death
+during extraction cannot leave a partial active `_root`, metadata, or CSV file.
 Recovery validates the complete record and all participating paths before the
-first mutation; an unproven final component is never deleted. The next clone
+first mutation; an unproven final component is never deleted. Rollback also moves
+proven new components aside atomically before restoring the backup. Cleanup
+retains staging, package, and owner marker at their original paths while a
+publication journal remains, including when a temporary I/O error interrupts
+rollback. The next clone
 command deterministically restores an interrupted transaction before other
 work, and a recovered post-save apply never resurrects its pre-apply
 authorization marker. Each publication backup contains
 `publication-completion.json` with one of the durable states `not_committed`,
 `committed`, or `committed_with_diagnostic_failure`, so a failed optional report
-write cannot make an already committed operation look safe to repeat.
+write cannot make an already committed operation look safe to repeat. A locked
+completion file is also a diagnostic failure after verified commit and does not
+revoke the verified apply bundle. If the completion file still says
+`not_committed`, a retained journal with `state=committed` takes precedence; the
+next clone command verifies the installed state and updates completion before
+removing the journal/package. Older journal schemas require manual inspection
+with all transaction evidence retained. Bundles from earlier tool/policy versions
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v9`).
 
 The journal and the abrupt-child regression test cover managed failures and
 unexpected process termination while the filesystem state retained by Windows

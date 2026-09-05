@@ -483,19 +483,39 @@ allowlist сравниваются с моделью уже под read-lock. Me
 в hash-bound ZIP; commit использует пакет, а не изменяемое дерево staging. Тот же
 контракт применяется к post-save apply validation workspace.
 
-До первого move создаётся `.opennessllm-publication-transaction.json` schema 2.
+До первого move создаётся `.opennessllm-publication-transaction.json` schema 3.
 Его exact contract связывает owner, canonical workspace, operation, transaction
-ID, staging owner, immutable package SHA-256, completion-result path и все old/new
-fingerprints. Journal атомарно обновляется до и после каждой backup/install
+ID, staging owner, immutable package SHA-256, installation/result paths и все old/new
+fingerprints. Installation path фиксирован как дочерний
+`_publication-install-<transactionId>` внутри staging. Все компоненты сначала
+распаковываются туда и проверяются до backup старого baseline. Подготовленные
+компоненты устанавливаются целиком через same-volume rename; частичная запись
+никогда не выполняется по активному пути. Journal атомарно обновляется до и после каждой prepare/backup/install
 phase. Recovery сначала проверяет весь journal, package, owner marker, пути и
 состояния всех компонентов без единой мутации. `oldExists=false` не разрешает
 удалить active object, пока его fingerprint не совпал с recorded new state.
 Forged/stale/corrupt record останавливается fail closed с manual-recovery
 diagnostic.
 
+Rollback перемещает доказанный новый компонент в принадлежащий транзакции
+`_rollback` и возвращает backup через rename. Это сохраняет возможность повторного
+recovery даже при завершении процесса между этими действиями; рекурсивное
+удаление активного компонента при rollback не применяется. Общая защита внутри
+cleanup helpers сохраняет staging/package/owner marker на исходных путях при
+любом оставшемся journal в родительской цепочке или внутри удаляемого дерева.
+Unreadable/malformed journal также запрещает cleanup и quarantine. Поэтому
+ошибка rollback и последующий внешний catch не уничтожают recovery evidence.
+
 В transaction backup хранится `publication-completion.json`: `not_committed`,
 `committed` или `committed_with_diagnostic_failure`. Поэтому failure финального
-report после commit не требует повторять write или восстанавливать проект. Для
+report после commit не требует повторять write или восстанавливать проект.
+`FinalizeCommittedApplyPublication` разделяет authoritative verification и
+диагностику: реальная ошибка verification пробрасывается, а ошибка записи
+completion/after-check report возвращается как diagnostic failure. Во всех
+последующих диагностических шагах сохраняется уже обнаруженная ошибка.
+Заблокированный completion может временно остаться `not_committed`; решение
+`committed` в оставшемся journal имеет приоритет. Recovery проверяет установленные
+компоненты и обновляет completion до удаления journal/package. Для
 `apply-publication` после возможного Save старый authorization marker никогда не
 восстанавливается. Cleanup `_sync-staging` и `_apply-validation` имеет ownership
 marker, quarantine и audit; его ошибка после commit требует только локальной

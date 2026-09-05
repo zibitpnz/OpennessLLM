@@ -486,12 +486,29 @@ manifests и metadata в `_sync-staging` проверяется по exact inven
 равенству всех manifest/JSONL полей под read-lock, затем запечатывается в
 hash-bound ZIP. Commit читает только этот пакет.
 
-Publication journal schema 2 строго связывает canonical workspace, operation,
-transaction ID, staging owner, package SHA-256 и old/new fingerprints. Recovery
+Publication journal schema 3 строго связывает canonical workspace, operation,
+transaction ID, staging owner, package SHA-256, installation directory и old/new
+fingerprints. Распаковка и проверка всех компонентов завершаются во временном
+каталоге транзакции до перемещения старого baseline в backup. Установка каждого
+готового компонента выполняется переименованием на том же томе. Recovery
 сначала проверяет весь контракт без изменений; неподтверждённый active component
 не удаляется. В backup записывается `publication-completion.json` со state
 `not_committed`, `committed` или `committed_with_diagnostic_failure`. Поэтому
 ошибка финального CSV/TXT после commit не означает, что write нужно повторять.
+
+Если временная блокировка прервала rollback, cleanup сохраняет staging, ZIP и
+owner marker по исходным путям до завершения восстановления. Это действует и
+для вложенного sync внутри apply validation. Во время rollback новый компонент
+также перемещается целиком во временный каталог, затем возвращается backup.
+
+Заблокированный `publication-completion.json` после подтверждённого commit
+считается ошибкой диагностики; успешно проверенный apply bundle не отзывается.
+При расхождении с устаревшим completion-файлом решение `state=committed` в
+сохранённом журнале имеет приоритет. Следующая clone-команда проверит baseline,
+допишет completion и только затем освободит journal/package. Старые schema
+журнала требуют ручного разбора с сохранением всех файлов транзакции.
+Текущая версия `0.12.8`, write policy `clone-write-policy-v9`; старый bundle нужно
+обновить через `check-clone`.
 
 Эта гарантия проверена для managed failure и внезапного завершения процесса при
 сохранённом Windows filesystem state. Она не является гарантией упорядоченности

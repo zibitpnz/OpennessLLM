@@ -4,6 +4,27 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.8 addresses review 0005 of head `32bdb3d`. Publication extracts
+  and verifies all components in a transaction-owned installation directory
+  before moving the old baseline. Same-volume renames install whole components;
+  rollback likewise moves proven new components aside before restoring backup,
+  avoiding partial active files during copy or recursive removal.
+- Journal schema 3 binds the installation path and preparation phases. Sync and
+  apply cleanup preserve all transaction evidence at its original location while
+  any parent or nested publication journal remains, including after failed
+  rollback. Old journal schemas fail closed for manual inspection. Bundle schema
+  remains 7; tool version and write policy v9 invalidate earlier authorization.
+- The shared apply post-publication finalization branch treats locked completion
+  files as diagnostic failures after successful verification. It preserves the
+  verified bundle, keeps earlier diagnostic failures, and retains the committed
+  journal/package when completion could not be recorded. A committed journal
+  takes precedence over a stale prepared completion result.
+- Offline regressions pass `100/100`, including actual process kills inside
+  partially written root/metadata/CSV files, crashes after rename but before the
+  next journal update, interrupted rollback retried after unlocking, nested
+  transaction retention, and completion locks during/after commit. The unchanged
+  reviewer's managed-failure probe also now retains staging and recovers after
+  unlocking. The documented process-crash versus power-loss boundary is unchanged.
 - Version 0.12.7 closes the review of head `62cc2e9`. Sync and post-save apply
   publication now derive a fixed expected model from the authoritative bundle,
   immutable leased inputs, and fixed logical destinations. Every block/group
