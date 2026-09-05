@@ -19,20 +19,20 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.10.0")]
-[assembly: AssemblyFileVersion("0.12.10.0")]
+[assembly: AssemblyVersion("0.12.11.0")]
+[assembly: AssemblyFileVersion("0.12.11.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.10";
+        private const string ProductVersion = "0.12.11";
         private const string ProductVersionDate = "2026-09-06";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "7";
         private const string CloneMatcherRevision = "global-object-correlation-v5";
-        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v11";
+        private const string CloneWriteSafetyPolicyRevision = "clone-write-policy-v12";
         private const string ApplyStagingOwnerMarkerFileName = ".opennessllm-apply-staging-owner";
         private const string ApplyValidationOwnerMarkerFileName = ".opennessllm-apply-validation-owner";
         private const string SyncStagingOwnerMarkerFileName = ".opennessllm-sync-staging-owner";
@@ -64,6 +64,8 @@ namespace OpennessLLM
         // Offline fault injection only; never configured by a production command.
         [ThreadStatic]
         private static Action<string> _publicationRecoveryTestHook;
+        [ThreadStatic]
+        private static Action<string> _publicationCommitJournalTestHook;
 
         private static int Main(string[] args)
         {
@@ -17694,17 +17696,24 @@ namespace OpennessLLM
             }
             catch (Exception ex)
             {
-                try
+                // A failed final flush does not prove that atomic replacement of
+                // the committed journal failed. Only disk evidence can decide.
+                PublicationRecoveryResult recovery = TryRecoverIncompletePublication(outDir, false);
+                if (recovery.Outcome == PublicationRecoveryOutcome.Committed
+                    && EqualsIgnoreCase(recovery.TransactionId, commitResult.TransactionId))
                 {
-                    RecoverIncompletePublication(outDir);
+                    PublicationCommitResult confirmed = recovery.CommitResult;
+                    confirmed.DiagnosticFailure = CombinePublicationDiagnosticFailures(ex, recovery.Failure);
+                    throw new PublicationCommittedDiagnosticException(
+                        "Clone publication committed and its installed state was verified from the on-disk journal; no rollback was performed. Completion diagnostics require attention: " + confirmed.DiagnosticFailure.Message,
+                        confirmed, confirmed.DiagnosticFailure);
                 }
-                catch (Exception recoveryException)
-                {
+                if ((recovery.Outcome != PublicationRecoveryOutcome.CaptureAborted && recovery.Outcome != PublicationRecoveryOutcome.RolledBack)
+                    || !EqualsIgnoreCase(recovery.TransactionId, commitResult.TransactionId))
                     throw new InvalidOperationException(
-                        "Clone workspace publication failed and durable recovery was incomplete. Follow the transaction journal at " + journalPath + ".",
-                        new AggregateException(ex, recoveryException));
-                }
-                throw new InvalidOperationException(IsPublicationCaptureState(SidecarValue(journal, "state"))
+                        "Clone workspace publication failed and durable recovery was incomplete; the outcome is unresolved, not a confirmed rollback. Follow the transaction journal at " + journalPath + ".",
+                        new AggregateException(ex, recovery.Failure ?? new InvalidDataException("No matching completed recovery outcome was established.")));
+                throw new InvalidOperationException(recovery.Outcome == PublicationRecoveryOutcome.CaptureAborted
                     ? "Clone workspace publication was not committed; local edits were preserved and captured objects were returned. Run check-clone again."
                     : "Clone workspace publication failed; the previous durable baseline was restored from the transaction journal.", ex);
             }
@@ -18122,13 +18131,20 @@ namespace OpennessLLM
             }
             catch (Exception ex)
             {
-                failure = ex;
-                if (result != null) result.DiagnosticFailure = ex;
-                UpdatePublicationCompletionResultBestEffort(result, "committed_with_diagnostic_failure", "failed", ex.GetType().Name + ": " + ex.Message);
+                failure = CombinePublicationDiagnosticFailures(result == null ? null : result.DiagnosticFailure, ex);
+                if (result != null) result.DiagnosticFailure = failure;
+                UpdatePublicationCompletionResultBestEffort(result, "committed_with_diagnostic_failure", "failed", failure.GetType().Name + ": " + failure.Message);
                 Console.WriteLine("WARNING: " + operationLabel + " committed successfully; do not repeat writes or restore the project because of this diagnostic failure: " + ex.Message);
                 if (result != null) Console.WriteLine("Durable completion result: " + result.CompletionResultPath);
                 return false;
             }
+        }
+
+        private static Exception CombinePublicationDiagnosticFailures(Exception first, Exception next)
+        {
+            if (first == null) return next;
+            if (next == null || object.ReferenceEquals(first, next)) return first;
+            return new AggregateException("Publication committed with multiple diagnostic failures.", first, next);
         }
 
         private static void InvokePublicationCrashHook(Action<string> crashHook, string phase)
@@ -18160,7 +18176,13 @@ namespace OpennessLLM
             journal["state"] = state;
             journal["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
             ValidateExactFlatObjectKeys(journal, PublicationJournalKeys(), "publication transaction journal");
+            // Offline-only IO injection. Do not wrap this hook as a simulated
+            // process crash: the actual replace/flush error must enter recovery.
+            if (state == "committed" && _publicationCommitJournalTestHook != null)
+                _publicationCommitJournalTestHook("before-replace");
             WriteFlatJsonObjectAtomically(journalPath, journal);
+            if (state == "committed" && _publicationCommitJournalTestHook != null)
+                _publicationCommitJournalTestHook("after-replace-before-flush");
             FlushFileToDisk(journalPath);
         }
 
@@ -18462,16 +18484,34 @@ namespace OpennessLLM
             return exists;
         }
 
-        private static void RecoverIncompletePublication(string outDir)
+        private static PublicationRecoveryResult RecoverIncompletePublication(string outDir)
         {
-            RecoverIncompletePublication(outDir, false);
+            return RecoverIncompletePublication(outDir, false);
         }
 
-        private static void RecoverIncompletePublication(string outDir, bool cleanupRecoveredStaging)
+        private static PublicationRecoveryResult RecoverIncompletePublication(string outDir, bool cleanupRecoveredStaging)
+        {
+            PublicationRecoveryResult result = TryRecoverIncompletePublication(outDir, cleanupRecoveredStaging);
+            // Entry-point recovery must not let a NEW command replace a journal
+            // whose completion/cleanup is still unresolved. Only the publisher
+            // handling its OWN transaction may accept a committed diagnostic.
+            if (result.Failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(result.Failure).Throw();
+            return result;
+        }
+
+        private static PublicationRecoveryResult TryRecoverIncompletePublication(string outDir, bool cleanupRecoveredStaging)
+        {
+            try { return RecoverIncompletePublicationCore(outDir, cleanupRecoveredStaging); }
+            catch (PublicationCrashSimulationException) { throw; }
+            catch (Exception ex) { return new PublicationRecoveryResult { Outcome = PublicationRecoveryOutcome.Unresolved, Failure = ex }; }
+        }
+
+        private static PublicationRecoveryResult RecoverIncompletePublicationCore(string outDir, bool cleanupRecoveredStaging)
         {
             outDir = Path.GetFullPath(outDir);
             string journalPath = Path.Combine(outDir, PublicationTransactionFileName);
-            if (!File.Exists(journalPath)) return;
+            InvokePublicationCrashHook(_publicationRecoveryTestHook, "recovery-before-read");
+            if (!File.Exists(journalPath)) return new PublicationRecoveryResult { Outcome = PublicationRecoveryOutcome.NoJournal };
             Dictionary<string, string> journal = ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath);
             ValidatePublicationJournalContract(outDir, journal, journalPath);
             string transactionId = SidecarValue(journal, "transactionId");
@@ -18493,7 +18533,7 @@ namespace OpennessLLM
                 File.Delete(journalPath);
                 Console.WriteLine("Aborted unverified " + operation + " capture; local workspace edits were preserved. Run check-clone again.");
                 if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
-                return;
+                return new PublicationRecoveryResult { Outcome = PublicationRecoveryOutcome.CaptureAborted, TransactionId = transactionId };
             }
 
             if (EqualsIgnoreCase(state, "committed"))
@@ -18501,17 +18541,30 @@ namespace OpennessLLM
                 try
                 {
                     ValidateInstalledPublication(outDir, journal);
-                    WritePublicationCompletionResult(journal, "committed", "recovered", "Committed publication was verified after process restart.");
-                    File.Delete(journalPath);
-                    if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
-                    return;
                 }
                 catch (Exception ex)
                 {
                     throw new InvalidOperationException(
-                        "Publication journal records a committed transaction, but installed-state or completion-result verification failed. Recovery is not required and no workspace component was changed; inspect " + journalPath + ".",
-                        ex);
+                        "Publication journal records a committed transaction, but installed-state verification failed. No workspace component was changed; inspect " + journalPath + ".", ex);
                 }
+                PublicationRecoveryResult committed = new PublicationRecoveryResult
+                {
+                    Outcome = PublicationRecoveryOutcome.Committed,
+                    TransactionId = transactionId,
+                    CommitResult = PublicationCommitResultFromJournal(journal)
+                };
+                try
+                {
+                    WritePublicationCompletionResult(journal, "committed", "recovered", "Committed publication was verified from its on-disk journal.");
+                    File.Delete(journalPath);
+                    if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
+                }
+                catch (Exception ex)
+                {
+                    committed.CommitResult.DiagnosticFailure = ex;
+                    committed.Failure = ex;
+                }
+                return committed;
             }
 
             // Inspect prior rollback captures BEFORE touching another component.
@@ -18552,6 +18605,7 @@ namespace OpennessLLM
             File.Delete(journalPath);
             Console.WriteLine("Recovered incomplete " + operation + " transaction " + transactionId + " by restoring the previous clone baseline. Rollback captures, if any, remain for manual inspection in " + Path.Combine(backupDir, "_rollback") + ".");
             if (cleanupRecoveredStaging) CleanupRecoveredPublicationStaging(operation, stagingDir);
+            return new PublicationRecoveryResult { Outcome = PublicationRecoveryOutcome.RolledBack, TransactionId = transactionId };
         }
 
         private static void ValidatePublicationRecoveryComponent(
@@ -29803,6 +29857,10 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-publication-edited-capture-process-kill", SelfTestPublicationEditedCaptureProcessKill);
             RunSelfTestCase(results, outDir, "clone-publication-managed-recovery-retention", SelfTestClonePublicationManagedRecoveryRetention);
             RunSelfTestCase(results, outDir, "apply-publication-locked-completion-finalization", SelfTestApplyPublicationLockedCompletionFinalization);
+            RunSelfTestCase(results, outDir, "clone-publication-committed-journal-flush", SelfTestPublicationCommittedJournalFlush);
+            RunSelfTestCase(results, outDir, "clone-publication-before-commit-replacement", SelfTestPublicationBeforeCommitReplacement);
+            RunSelfTestCase(results, outDir, "clone-publication-commit-verification-failure", SelfTestPublicationCommitVerificationFailure);
+            RunSelfTestCase(results, outDir, "clone-publication-commit-diagnostic-retention", SelfTestPublicationCommitDiagnosticRetention);
             RunSelfTestCase(results, outDir, "clone-publication-journal-forgery", SelfTestClonePublicationJournalForgery);
             RunSelfTestCase(results, outDir, "clone-publication-committed-report-failure", SelfTestClonePublicationCommittedReportFailure);
             RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
@@ -32312,6 +32370,11 @@ namespace OpennessLLM
 
         private static void SelfTestSyncCloneTransactionSuccess(string caseDir)
         {
+            SelfTestSyncCloneTransactionCompletion(caseDir, false);
+        }
+
+        private static void SelfTestSyncCloneTransactionCompletion(string caseDir, bool failCommittedFlush)
+        {
             string cloneDir = Path.Combine(caseDir, "CLONE_PROJECT");
             string rootDir = Path.Combine(cloneDir, "_root");
             string compareDir = Path.Combine(cloneDir, "_compare", "current-transaction");
@@ -32338,7 +32401,22 @@ namespace OpennessLLM
             WriteCsv(Path.Combine(cloneDir, CloneCheckSourceBlockerFileName), new[] { "CheckSchemaVersion", "CheckRunId", "Severity" }, new string[0][]);
             CompleteSelfTestCloneCheckBundle(cloneDir, compareDir, checkRunId, 1, 0);
 
-            SyncProjectClone(cloneDir);
+            FileStream journalReadLease = null;
+            try
+            {
+                if (failCommittedFlush) _publicationCommitJournalTestHook = delegate(string phase)
+                {
+                    if (phase == "after-replace-before-flush")
+                        journalReadLease = new FileStream(Path.Combine(cloneDir, PublicationTransactionFileName), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                };
+                SyncProjectClone(cloneDir);
+                if (failCommittedFlush) AssertTrue(journalReadLease != null, "full sync caller must reach the real committed-flush IO failure");
+            }
+            finally
+            {
+                _publicationCommitJournalTestHook = null;
+                if (journalReadLease != null) journalReadLease.Dispose();
+            }
 
             AssertEqual(File.ReadAllText(currentPath, Encoding.UTF8), File.ReadAllText(clonePath, Encoding.UTF8), "successful sync transaction must publish the staged source");
             Dictionary<string, string> manifest = ReadCsv(Path.Combine(cloneDir, "plc-blocks.csv")).Single();
@@ -32350,8 +32428,9 @@ namespace OpennessLLM
             string backup = Directory.GetDirectories(Path.Combine(cloneDir, "_sync-backups"), "sync-*", SearchOption.TopDirectoryOnly).Single();
             AssertEqual(oldContent, File.ReadAllText(Path.Combine(backup, "_root", "10_FB.scl"), Encoding.UTF8), "successful sync must retain the previous source in its transaction backup");
             Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(Path.Combine(backup, "publication-completion.json"), Encoding.UTF8), Path.Combine(backup, "publication-completion.json"));
-            AssertEqual("committed", SidecarValue(completion, "state"), "successful sync must leave an unambiguous durable committed result");
-            AssertEqual("ok", SidecarValue(completion, "diagnosticStatus"), "successful sync report publication must update the durable diagnostic status");
+            AssertEqual(failCommittedFlush ? "committed_with_diagnostic_failure" : "committed", SidecarValue(completion, "state"), "successful sync must leave an unambiguous durable committed result");
+            AssertEqual(failCommittedFlush ? "failed" : "ok", SidecarValue(completion, "diagnosticStatus"), "sync reports must preserve any earlier committed-flush diagnostic");
+            AssertTrue(File.ReadAllText(Path.Combine(cloneDir, "sync-clone-summary.txt")).Contains("Baseline published: True"), "full sync caller must report the baseline as published");
         }
 
         private static void SelfTestSyncCloneTransactionFailure(string caseDir)
@@ -33717,6 +33796,265 @@ namespace OpennessLLM
             }
         }
 
+        private static void SelfTestPublicationCommittedJournalFlush(string caseDir)
+        {
+            List<string> failures = new List<string>();
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
+                string staging, backup;
+                bool injected = false, verified = false, callerFailed = false;
+                PublicationCommitResult result = null;
+                Exception publicationException = null;
+                FileStream journalReadLease = null;
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    try
+                    {
+                        _publicationCommitJournalTestHook = delegate(string phase)
+                        {
+                            if (phase != "after-replace-before-flush") return;
+                            AssertEqual("committed", ParseStrictFlatJsonObject(File.ReadAllText(journalPath, Encoding.UTF8), journalPath)["state"], "commit must already be visible on disk");
+                            journalReadLease = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                            injected = true;
+                        };
+                        try { result = CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, null); }
+                        catch (PublicationCommittedDiagnosticException ex) { result = ex.CommitResult; publicationException = ex; }
+                        catch (Exception ex) { publicationException = ex; callerFailed = true; }
+                    }
+                    finally
+                    {
+                        _publicationCommitJournalTestHook = null;
+                        if (journalReadLease != null) journalReadLease.Dispose();
+                    }
+                }
+                string completionPath = Path.Combine(backup, "publication-completion.json");
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath, Encoding.UTF8), completionPath);
+                bool newActive = File.Exists(Path.Combine(workspace, "_root", "new.scl")) && !File.Exists(Path.Combine(workspace, "_root", "old.scl"));
+                Console.WriteLine("Commit flush " + operation + ": injected=" + injected + ", newActive=" + newActive
+                    + ", completion=" + completion["state"] + "/" + completion["diagnosticStatus"]
+                    + ", resultReturned=" + (result != null) + ", ordinaryCallerFailure=" + callerFailed
+                    + ", publisher=" + (publicationException == null ? "none" : publicationException.GetType().Name + ": " + publicationException.Message));
+                bool actualIoFailure = publicationException != null && publicationException.InnerException is IOException;
+                if (!injected || !newActive || !completion["state"].StartsWith("committed", StringComparison.Ordinal)
+                    || result == null || callerFailed || !actualIoFailure || !object.ReferenceEquals(result.DiagnosticFailure, publicationException.InnerException))
+                {
+                    failures.Add(operation);
+                    continue;
+                }
+                string markerPath = Path.Combine(workspace, CloneCheckBundleFileName);
+                Exception diagnostic;
+                if (operation == "apply-publication")
+                {
+                    diagnostic = FinalizeCommittedApplyPublication(result,
+                        delegate
+                        {
+                            AssertEqual("new-root\n", File.ReadAllText(Path.Combine(workspace, "_root", "new.scl")), "post-commit verification must inspect the new source");
+                            WriteTextFile(markerPath, "verified-post-save-bundle\n");
+                            verified = true;
+                        }, delegate { WriteTextFile(Path.Combine(workspace, "after-check.txt"), "verified\n"); });
+                    AssertTrue(verified && File.Exists(markerPath), "apply must execute required verification and retain its new authorization");
+                }
+                else
+                {
+                    TryWriteCommittedPublicationDiagnostics(result, operation, delegate { verified = true; }, out diagnostic);
+                    diagnostic = diagnostic ?? result.DiagnosticFailure;
+                    AssertTrue(!File.Exists(markerPath), "sync must consume its old authorization");
+                }
+                AssertTrue(verified && diagnostic is IOException, "original flush failure must survive caller finalization");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath, Encoding.UTF8), completionPath);
+                AssertEqual("committed_with_diagnostic_failure", completion["state"], "completion must agree with the committed caller result");
+                AssertTrue(!File.Exists(journalPath), "recoverable read-only lease must allow committed journal finalization");
+                AssertTrue((operation == "sync-clone" ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging)).Removed, "resolved commit must permit staging cleanup");
+            }
+            AssertTrue(failures.Count == 0, "visible committed journal followed by real flush IO failure must remain a committed caller outcome: " + string.Join(", ", failures));
+            // Exercise the complete non-TIA sync command, including its actual
+            // committed catch, staging cleanup and final summary publication.
+            SelfTestSyncCloneTransactionCompletion(Path.Combine(caseDir, "c"), true);
+        }
+
+        private static bool SelfTestExceptionContains(Exception actual, Exception expected)
+        {
+            if (actual == null || expected == null) return false;
+            if (object.ReferenceEquals(actual, expected)) return true;
+            AggregateException aggregate = actual as AggregateException;
+            return aggregate != null
+                ? aggregate.InnerExceptions.Any(ex => SelfTestExceptionContains(ex, expected))
+                : SelfTestExceptionContains(actual.InnerException, expected);
+        }
+
+        private static void SelfTestPublicationBeforeCommitReplacement(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            foreach (bool releaseForRecovery in new[] { true, false })
+            {
+                string workspace = Path.Combine(caseDir, (operation == "sync-clone" ? "s" : "a") + (releaseForRecovery ? "r" : "h"));
+                string staging, backup, original;
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                FileStream journalLock = null;
+                bool injected = false, replaced = false, recoveredFromOldJournal = false;
+                PublicationCommitResult result = null;
+                Exception failure = null;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    original = ActivePublicationFingerprint(workspace);
+                    try
+                    {
+                        _publicationCommitJournalTestHook = delegate(string phase)
+                        {
+                            if (phase == "after-replace-before-flush") replaced = true;
+                            if (phase != "before-replace") return;
+                            AssertEqual("metadata-installed", ParseStrictFlatJsonObject(File.ReadAllText(journalPath), journalPath)["state"], "disk must still contain the pre-commit state");
+                            journalLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                            injected = true;
+                        };
+                        _publicationRecoveryTestHook = delegate(string phase)
+                        {
+                            if (phase != "recovery-before-read" || journalLock == null) return;
+                            AssertEqual("metadata-installed", ParseStrictFlatJsonObject(File.ReadAllText(journalPath), journalPath)["state"], "failed replacement must not authorize the in-memory committed state");
+                            recoveredFromOldJournal = true;
+                            if (releaseForRecovery) { journalLock.Dispose(); journalLock = null; }
+                        };
+                        try { result = CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, null); }
+                        catch (Exception ex) { failure = ex; }
+                    }
+                    finally
+                    {
+                        _publicationCommitJournalTestHook = null;
+                        _publicationRecoveryTestHook = null;
+                        if (journalLock != null) journalLock.Dispose();
+                    }
+                }
+                AssertTrue(injected && !replaced && recoveredFromOldJournal && result == null
+                    && failure is InvalidOperationException && !(failure is PublicationCommittedDiagnosticException), "pre-replacement IO failure must not become a committed caller result");
+                if (releaseForRecovery)
+                {
+                    AssertTrue(failure.InnerException is IOException, "the atomic replacement itself must fail with real IO");
+                    AssertEqual(original, ActivePublicationFingerprint(workspace), "successful rollback must restore the old baseline");
+                    AssertTrue(!File.Exists(journalPath), "completed rollback must clear the journal");
+                }
+                else
+                {
+                    AssertTrue(failure.InnerException is AggregateException && failure.Message.Contains("outcome is unresolved"), "blocked recovery must not claim a completed rollback");
+                    AssertEqual("retained-for-publication-journal", (operation == "sync-clone" ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging)).Status, "unresolved rollback must retain its evidence");
+                    PublicationRecoveryResult retried = RecoverIncompletePublication(workspace, true);
+                    AssertTrue(retried.Outcome == PublicationRecoveryOutcome.RolledBack && retried.Failure == null, "unlocked retry must explicitly report rollback, not commit");
+                    AssertEqual(original, ActivePublicationFingerprint(workspace), "retry must restore the complete old baseline");
+                }
+                string completionPath = Path.Combine(backup, "publication-completion.json");
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                AssertEqual("not_committed", completion["state"], "pre-commit completion must never say committed");
+                AssertEqual("rolled_back", completion["diagnosticStatus"], "completion must agree with the actual recovery outcome");
+                AssertTrue(RecoverIncompletePublication(workspace).Outcome == PublicationRecoveryOutcome.NoJournal, "finished recovery must be idempotent");
+            }
+        }
+
+        private static void SelfTestPublicationCommitVerificationFailure(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
+                string staging, backup;
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                FileStream journalLock = null;
+                Exception failure = null;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    try
+                    {
+                        _publicationCommitJournalTestHook = delegate(string phase)
+                        {
+                            if (phase != "after-replace-before-flush") return;
+                            WriteTextFile(Path.Combine(workspace, "_root", "new.scl"), "late-editor-after-commit\n");
+                            journalLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                        };
+                        try { CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, null); }
+                        catch (Exception ex) { failure = ex; }
+                    }
+                    finally
+                    {
+                        _publicationCommitJournalTestHook = null;
+                        if (journalLock != null) journalLock.Dispose();
+                    }
+                }
+                AssertTrue(failure is InvalidOperationException && !(failure is PublicationCommittedDiagnosticException)
+                    && failure.Message.Contains("outcome is unresolved"), "committed field alone must not bypass installed-state verification");
+                string active = ActivePublicationFingerprint(workspace);
+                PublicationRecoveryResult retry = TryRecoverIncompletePublication(workspace, true);
+                AssertTrue(retry.Outcome == PublicationRecoveryOutcome.Unresolved && retry.Failure != null && retry.CommitResult == null, "verification conflict must remain unresolved on retry");
+                AssertEqual(active, ActivePublicationFingerprint(workspace), "failed verification must not modify active editor bytes");
+                AssertEqual("late-editor-after-commit\n", File.ReadAllText(Path.Combine(workspace, "_root", "new.scl")), "editor bytes must survive");
+                AssertEqual("old-root\n", File.ReadAllText(Path.Combine(backup, "_root", "old.scl")), "old backup must survive");
+                AssertTrue(File.Exists(journalPath), "unverified commit journal must remain for inspection");
+                AssertEqual("retained-for-publication-journal", (operation == "sync-clone" ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging)).Status, "unverified commit must retain its package");
+                AssertTrue(!File.Exists(Path.Combine(workspace, CloneCheckBundleFileName)), "no unverified authorization may be created");
+            }
+        }
+
+        private static void SelfTestPublicationCommitDiagnosticRetention(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
+                string staging, backup;
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                FileStream journalLock = null, completionLock = null;
+                PublicationCommitResult result = null;
+                Exception initialDiagnostic = null;
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    try
+                    {
+                        _publicationCommitJournalTestHook = delegate(string phase)
+                        {
+                            if (phase != "after-replace-before-flush") return;
+                            journalLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                            completionLock = new FileStream(Path.Combine(backup, "publication-completion.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+                        };
+                        try { result = CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, null); }
+                        catch (PublicationCommittedDiagnosticException ex) { result = ex.CommitResult; initialDiagnostic = ex.InnerException; }
+                        finally { _publicationCommitJournalTestHook = null; lease.Dispose(); }
+                        AggregateException combined = initialDiagnostic as AggregateException;
+                        AssertTrue(result != null && combined != null && combined.InnerExceptions.Count == 2
+                            && combined.InnerExceptions.All(ex => ex is IOException), "real flush and recovery-completion failures must both survive the committed result");
+                        string retainedJournalHash = ComputeFileSha256(journalPath);
+                        bool nextCommandRejected = false;
+                        try { using (AcquireCloneWorkspaceLock(workspace, "must-not-start-next-publication")) { } }
+                        catch (IOException) { nextCommandRejected = true; }
+                        AssertTrue(nextCommandRejected, "mandatory entry recovery must block a NEW command while completion is locked");
+                        AssertEqual(retainedJournalHash, ComputeFileSha256(journalPath), "blocked entry must preserve the previous committed journal");
+                        bool verified = false;
+                        Exception diagnostic;
+                        Action verify = delegate
+                        {
+                            AssertEqual("new-root\n", File.ReadAllText(Path.Combine(workspace, "_root", "new.scl")), "committed caller must verify new state even with two IO diagnostics");
+                            verified = true;
+                        };
+                        if (operation == "apply-publication") diagnostic = FinalizeCommittedApplyPublication(result, verify, delegate { });
+                        else TryWriteCommittedPublicationDiagnostics(result, operation, verify, out diagnostic);
+                        AssertTrue(verified && SelfTestExceptionContains(diagnostic, initialDiagnostic), "later completion failure must preserve both original diagnostics and run verification");
+                        AssertEqual("retained-for-publication-journal", (operation == "sync-clone" ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging)).Status, "committed but unfinished diagnostics must retain their journal package");
+                    }
+                    finally
+                    {
+                        _publicationCommitJournalTestHook = null;
+                        if (journalLock != null) journalLock.Dispose();
+                        if (completionLock != null) completionLock.Dispose();
+                    }
+                }
+                PublicationRecoveryResult retried = RecoverIncompletePublication(workspace, true);
+                AssertTrue(retried.Outcome == PublicationRecoveryOutcome.Committed && retried.Failure == null
+                    && retried.TransactionId == result.TransactionId, "retry must report the SAME committed transaction explicitly");
+                Exception ignored;
+                TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out ignored);
+                AssertTrue(ignored == null && SelfTestExceptionContains(result.DiagnosticFailure, initialDiagnostic), "successful diagnostic retry must not erase the original errors");
+                string completionPath = Path.Combine(backup, "publication-completion.json");
+                AssertEqual("committed_with_diagnostic_failure", ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath)["state"], "persisted completion must agree with the caller's diagnostic outcome");
+                AssertTrue(!File.Exists(journalPath) && !Directory.Exists(staging), "resolved committed retry must release transaction evidence");
+            }
+        }
+
         private static void SelfTestApplyPublicationLockedCompletionFinalization(string caseDir)
         {
             foreach (bool lockDuringCommit in new[] { true, false })
@@ -33748,6 +34086,7 @@ namespace OpennessLLM
                     bool verified = false;
                     bool publishFailure = false;
                     Exception diagnostic = null;
+                    Exception initialDiagnostic = result.DiagnosticFailure;
                     try
                     {
                         // Run the production post-publication branch. TIA's
@@ -33767,7 +34106,8 @@ namespace OpennessLLM
                         publishFailure = true;
                         InvalidateCloneCheckBundle(workspace);
                     }
-                    AssertTrue(verified && diagnostic is IOException && !publishFailure, "locked completion must return a diagnostic failure, not enter the publication failure handler");
+                    AssertTrue(verified && (diagnostic is IOException || diagnostic is AggregateException) && !publishFailure, "locked completion must return a diagnostic failure, not enter the publication failure handler");
+                    if (initialDiagnostic != null) AssertTrue(SelfTestExceptionContains(diagnostic, initialDiagnostic), "later completion failures must preserve the original commit diagnostic");
                     Exception reportFailure;
                     TryWriteCommittedPublicationDiagnostics(result, "apply-clone",
                         delegate
@@ -38077,6 +38417,16 @@ namespace OpennessLLM
             public List<Dictionary<string, string>> GroupRows = new List<Dictionary<string, string>>();
             public HashSet<string> ExpectedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public HashSet<string> ExpectedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private enum PublicationRecoveryOutcome { Unresolved, NoJournal, Committed, RolledBack, CaptureAborted }
+
+        private sealed class PublicationRecoveryResult
+        {
+            public PublicationRecoveryOutcome Outcome;
+            public string TransactionId;
+            public PublicationCommitResult CommitResult;
+            public Exception Failure;
         }
 
         private sealed class PublicationCommitResult

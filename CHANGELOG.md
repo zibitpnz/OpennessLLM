@@ -4,6 +4,28 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.11 addresses review-b2 of head `71b9088`. A deterministic Windows
+  regression reproduced the P2 for BOTH sync and apply: atomic committed-journal
+  replacement succeeded, then a real read lease blocked the ReadWrite flush.
+  Recovery kept the new baseline and wrote committed/recovered, but the caller
+  received an ordinary failure claiming rollback. Before the fix, the previous
+  110 tests passed and the new regression failed (110 passed, 1 failed).
+- Recovery now returns explicit disk-verified outcomes: Committed, RolledBack,
+  CaptureAborted, or Unresolved (plus NoJournal when nothing needs recovery).
+  The publisher matches the recovered transaction ID and routes confirmed commit
+  through PublicationCommittedDiagnosticException, preserving the original I/O
+  error and mandatory apply verification. Subsequent diagnostic errors are
+  combined, not substituted. Command-entry recovery still blocks new work if
+  an earlier transaction's completion cannot be finalized.
+- Regression coverage includes the exact real-I/O fault in both publishers,
+  the full sync caller and production apply finalizer, failed replacement BEFORE
+  commit, blocked rollback and retry, committed-state verification conflicts,
+  simultaneous flush/completion failures, and diagnostic retention through retry.
+  CI artifacts now include dot-prefixed journals from generated offline fixtures
+  so reviewers can inspect retained journal contents directly. Write policy is
+  v12; publication journal schema remains 5 and check-bundle schema remains 7.
+  Final self-tests pass 114/114 in both short and review-nested output paths;
+  the previous reviewer's unchanged independent probe passes 10/10.
 - Version 0.12.10 addresses review-b1 of head `6c9c593`. A deterministic
   Windows regression reproduced loss of late editor additions, edits and
   file replacements during strict rollback, for BOTH sync and apply (six

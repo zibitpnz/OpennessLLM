@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.10`. Created by `Zibitpnz`.
+Current version: `0.12.11`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -375,9 +375,19 @@ completion file is also a diagnostic failure after verified commit and does not
 revoke the verified apply bundle. If the completion file still says
 `not_committed`, a retained journal with `state=committed` takes precedence; the
 next clone command verifies the installed state and updates completion before
-removing the journal/package. Older journal schemas require manual inspection
+removing the journal/package. A failure reopening the journal for flush after
+its atomic replacement does not prove that commit failed. Recovery distinguishes
+verified commit, completed rollback, aborted capture, and unresolved outcome from
+the ON-DISK journal and component verification, never the in-memory state alone.
+A verified commit returns through the committed-diagnostic caller branch; apply
+still runs its mandatory post-commit verification. Original I/O diagnostics are
+preserved even if later completion/report writes fail too. An unreadable journal
+or failed installed-state verification remains unresolved, with evidence retained,
+not a claimed rollback or successful commit. Mandatory recovery at command entry
+blocks new work while a previous transaction's completion cannot be finalized.
+Older journal schemas require manual inspection
 with all transaction evidence retained. Bundles from earlier tool/policy versions
-must be refreshed with `check-clone` (current policy: `clone-write-policy-v11`,
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v12`,
 publication journal schema `5`, check-bundle schema still `7`).
 
 The journal and the abrupt-child regression test cover managed failures and
