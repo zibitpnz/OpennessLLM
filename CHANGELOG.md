@@ -4,6 +4,23 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.12 addresses the nonblocking review-b3 P3 against `e16bedc`.
+  The reviewer closed the previous P1/P2. Strengthening the existing real-I/O
+  retention test reproduced missing durable details for BOTH sync and apply:
+  113 tests passed, 1 failed, with zero of two original causes retained in JSON.
+- Completion result schema 2 adds a flat `diagnosticDetails` string containing
+  the complete exception representation, including aggregate siblings, ordinary
+  inner causes and available stack traces. The existing concise `message` and
+  outcome/status fields remain. Both normal and best-effort completion writes
+  persist the details; same-result successful retries retain them.
+- Added JSON round-trip coverage for empty/single/nested aggregate diagnostics,
+  quotes, backslashes, line breaks, tabs, Unicode and control characters, plus
+  best-effort report failure and retry. The real locked journal/completion test
+  now reads the saved JSON and asserts both original IOException details.
+  Commit/rollback decisions, publication journal schema 5, check-bundle schema 7
+  and write policy v12 are unchanged; only completion diagnostics changed.
+  Both final full runs pass 115/115 (short and review-nested paths); the previous
+  reviewer's unchanged independent probe passes 10/10.
 - Version 0.12.11 addresses review-b2 of head `71b9088`. A deterministic Windows
   regression reproduced the P2 for BOTH sync and apply: atomic committed-journal
   replacement succeeded, then a real read lease blocked the ReadWrite flush.

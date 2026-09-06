@@ -19,15 +19,15 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.11.0")]
-[assembly: AssemblyFileVersion("0.12.11.0")]
+[assembly: AssemblyVersion("0.12.12.0")]
+[assembly: AssemblyFileVersion("0.12.12.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.11";
+        private const string ProductVersion = "0.12.12";
         private const string ProductVersionDate = "2026-09-06";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "7";
@@ -40,7 +40,7 @@ namespace OpennessLLM
         private const string PublicationTransactionFileName = ".opennessllm-publication-transaction.json";
         private const string PublicationJournalSchemaVersion = "5";
         private const string PublicationOwnerMarkerSchemaVersion = "1";
-        private const string PublicationResultSchemaVersion = "1";
+        private const string PublicationResultSchemaVersion = "2";
         private const string CloneCheckBundleFileName = "clone-check-bundle.json";
         private const string CloneCheckAttemptFileName = "clone-check-attempt.json";
         private const string CloneCheckBlockFileName = "clone-check-blocks.csv";
@@ -18073,6 +18073,9 @@ namespace OpennessLLM
                     { "backupDir", result.BackupDir },
                     { "diagnosticStatus", diagnosticStatus },
                     { "message", EmptyIfNull(message) },
+                    // Keep the flat summary contract, but persist ALL inner
+                    // exceptions (including AggregateException siblings).
+                    { "diagnosticDetails", result.DiagnosticFailure == null ? string.Empty : result.DiagnosticFailure.ToString() },
                     { "updatedUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) }
                 });
             FlushFileToDisk(result.CompletionResultPath);
@@ -29861,6 +29864,7 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-publication-before-commit-replacement", SelfTestPublicationBeforeCommitReplacement);
             RunSelfTestCase(results, outDir, "clone-publication-commit-verification-failure", SelfTestPublicationCommitVerificationFailure);
             RunSelfTestCase(results, outDir, "clone-publication-commit-diagnostic-retention", SelfTestPublicationCommitDiagnosticRetention);
+            RunSelfTestCase(results, outDir, "clone-publication-diagnostic-details-json", SelfTestPublicationDiagnosticDetailsJson);
             RunSelfTestCase(results, outDir, "clone-publication-journal-forgery", SelfTestClonePublicationJournalForgery);
             RunSelfTestCase(results, outDir, "clone-publication-committed-report-failure", SelfTestClonePublicationCommittedReportFailure);
             RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
@@ -33994,6 +33998,7 @@ namespace OpennessLLM
 
         private static void SelfTestPublicationCommitDiagnosticRetention(string caseDir)
         {
+            List<string> missingDurableDetails = new List<string>();
             foreach (string operation in new[] { "sync-clone", "apply-publication" })
             {
                 string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
@@ -34050,8 +34055,71 @@ namespace OpennessLLM
                 TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out ignored);
                 AssertTrue(ignored == null && SelfTestExceptionContains(result.DiagnosticFailure, initialDiagnostic), "successful diagnostic retry must not erase the original errors");
                 string completionPath = Path.Combine(backup, "publication-completion.json");
-                AssertEqual("committed_with_diagnostic_failure", ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath)["state"], "persisted completion must agree with the caller's diagnostic outcome");
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                AssertEqual("committed_with_diagnostic_failure", completion["state"], "persisted completion must agree with the caller's diagnostic outcome");
+                string details = SidecarValue(completion, "diagnosticDetails");
+                int retainedCauses = 0;
+                foreach (Exception cause in ((AggregateException)initialDiagnostic).InnerExceptions)
+                {
+                    if (details.Contains(cause.GetType().FullName) && details.Contains(cause.Message)) retainedCauses++;
+                    else missingDurableDetails.Add(operation + ": " + cause.GetType().Name + ": " + cause.Message);
+                }
+                Console.WriteLine("Durable diagnostics " + operation + ": originalCauses=2, retainedCauses=" + retainedCauses
+                    + ", completion=" + completion["state"] + "/" + completion["diagnosticStatus"]);
                 AssertTrue(!File.Exists(journalPath) && !Directory.Exists(staging), "resolved committed retry must release transaction evidence");
+            }
+            AssertTrue(missingDurableDetails.Count == 0, "completion JSON must retain both original IO errors after retry: " + string.Join(" | ", missingDurableDetails));
+        }
+
+        private static void SelfTestPublicationDiagnosticDetailsJson(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
+                string backup = Path.Combine(workspace, operation == "sync-clone" ? "_sync-backups" : "_apply-backups", "details");
+                PublicationCommitResult result = new PublicationCommitResult
+                {
+                    TransactionId = Guid.NewGuid().ToString("N"), Operation = operation,
+                    WorkspacePath = workspace, BackupDir = backup,
+                    CompletionResultPath = Path.Combine(backup, "publication-completion.json")
+                };
+                Exception failure;
+                AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "clean diagnostics must be writable");
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertEqual("2", completion["resultSchemaVersion"], "additional diagnostic field must have an explicit result schema revision");
+                AssertEqual("committed", completion["state"], "clean completion state must be unchanged");
+                AssertEqual("ok", completion["diagnosticStatus"], "clean diagnostic status must be unchanged");
+                AssertEqual(string.Empty, completion["diagnosticDetails"], "clean completion must not invent exception details");
+
+                IOException first = new IOException("first cause: C:\\folder\\\"quoted\"\r\nnext line\tUnicode \u041f\u0443\u0442\u044c \u03a9; control \u0001");
+                result.DiagnosticFailure = first;
+                AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "single diagnostic must persist without changing the committed outcome");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertTrue(completion["diagnosticDetails"].Contains(first.GetType().FullName) && completion["diagnosticDetails"].Contains(first.Message), "single cause and escaped characters must round-trip through flat JSON");
+
+                UnauthorizedAccessException second = new UnauthorizedAccessException("second original cause");
+                InvalidOperationException wrapper = new InvalidOperationException("context wrapper", second);
+                IOException third = new IOException("third sibling cause");
+                AggregateException nested = new AggregateException("nested context", wrapper, third);
+                AggregateException combined = new AggregateException("multiple diagnostic summary", first, nested);
+                result.DiagnosticFailure = combined;
+                AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "nested aggregate must persist");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertEqual(combined.Message, completion["message"], "the existing concise summary must remain available");
+                foreach (Exception cause in new Exception[] { first, second, wrapper, third, nested, combined })
+                    AssertTrue(completion["diagnosticDetails"].Contains(cause.GetType().FullName) && completion["diagnosticDetails"].Contains(cause.Message), "all aggregate siblings and ordinary inner causes must be persisted: " + cause.Message);
+
+                IOException writerFailure = new IOException("later report writer cause");
+                AssertTrue(!TryWriteCommittedPublicationDiagnostics(result, operation, delegate { throw writerFailure; }, out failure), "writer failure must exercise best-effort completion persistence");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertTrue(completion["diagnosticDetails"].Contains(first.Message) && completion["diagnosticDetails"].Contains(second.Message)
+                    && completion["diagnosticDetails"].Contains(third.Message) && completion["diagnosticDetails"].Contains(writerFailure.Message), "best-effort completion must persist earlier AND later causes");
+                string persistedDetails = completion["diagnosticDetails"];
+                AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "retry must succeed");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertEqual(persistedDetails, completion["diagnosticDetails"], "successful same-result retry must retain the complete saved diagnostic text");
+                AssertEqual("committed_with_diagnostic_failure", completion["state"], "diagnostic serialization must not alter the committed outcome");
+                AssertEqual("failed", completion["diagnosticStatus"], "successful retry must not erase earlier diagnostics");
             }
         }
 

@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.11`. Created by `Zibitpnz`.
+Current version: `0.12.12`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -381,7 +381,15 @@ verified commit, completed rollback, aborted capture, and unresolved outcome fro
 the ON-DISK journal and component verification, never the in-memory state alone.
 A verified commit returns through the committed-diagnostic caller branch; apply
 still runs its mandatory post-commit verification. Original I/O diagnostics are
-preserved even if later completion/report writes fail too. An unreadable journal
+preserved even if later completion/report writes fail too. Completion result
+schema `2` adds the flat string `diagnosticDetails`: exception types, messages,
+inner causes and available stack traces, including all aggregate siblings. The
+existing `message` remains a concise summary; `diagnosticDetails` is empty when
+there is no diagnostic exception. Successful same-result retries retain this
+text. This is an optional diagnostic record, not recovery authorization; journal
+schema `5`, check-bundle schema `7` and write policy v12 are unchanged. Details
+can include local file paths and should be handled like other diagnostic logs.
+An unreadable journal
 or failed installed-state verification remains unresolved, with evidence retained,
 not a claimed rollback or successful commit. Mandatory recovery at command entry
 blocks new work while a previous transaction's completion cannot be finalized.
