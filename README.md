@@ -7,6 +7,37 @@ through explicit safety gates.
 
 Current version: `0.12.13`. Created by `Zibitpnz`.
 
+## Current version and compatibility
+
+This documentation describes the source version in this checkout, not every
+branch, previously built executable, or published release. Check the executable
+in the intended tool directory with `run.cmd version`. After changing branches
+or updating sources, run `build.cmd` explicitly: `run.cmd` builds automatically
+only when `bin\OpennessLLM.exe` is missing, not when an existing EXE is outdated.
+The `OpennessLLM` directory name in examples is illustrative; substitute the
+actual checkout directory when using a separate clone or worktree.
+
+| Contract | Current value |
+| --- | --- |
+| Version date | `2026-09-07` |
+| Clone metadata schema | `4` |
+| Clone-check bundle schema | `7` |
+| Matcher revision | `global-object-correlation-v5` |
+| Write-safety policy | `clone-write-policy-v12` |
+| Publication journal schema | `5` |
+| Publication completion result schema | `2` |
+
+Recent changes protect late editor changes in permanent rollback captures,
+distinguish disk-verified commit from rollback after I/O failures, and preserve
+full diagnostic history across fresh recovery processes. See
+[publication and recovery](#clone-publication-and-recovery) and
+[version history](CHANGELOG.md). Older version numbers in the changelog and
+phrases such as "since version" identify when a feature was introduced; they
+do not describe the current executable. After an upgrade, obtain a fresh
+`check-clone` bundle before apply/sync. Older publication journals require manual
+inspection with their evidence retained; changing their schema field is not a
+migration procedure.
+
 ## What It Does
 
 - inventories PLC and HMI objects through TIA Portal Openness;
@@ -329,8 +360,12 @@ the owned directory to an audited quarantine when possible. Clone workspace
 paths and recursive copies reject reparse points, junctions, and symlinks. All clone commands
 serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
-classification and is never moved as generated content. A strict schema-4
-publication journal binds its owner, canonical workspace, operation, transaction,
+classification and is never moved as generated content.
+
+### Clone publication and recovery
+
+A strict schema-5 publication journal binds its owner, canonical workspace,
+operation, transaction,
 staging owner, immutable package, installation directory, and every old/new
 component fingerprint. The package is fully extracted and verified in a
 transaction-owned directory before any old component is moved to backup. Each

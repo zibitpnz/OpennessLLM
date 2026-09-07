@@ -4,6 +4,12 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+### 0.12.13
+
+- Aligned current-version labels in the command reference, handoff and portable
+  manifest with the source version. Added a compatibility table, explicit rebuild
+  guidance for stale executables, and current journal/rollback/diagnostic-history
+  descriptions. This is a documentation-only update, not a new executable version.
 - Version 0.12.13 addresses the nonblocking review-b4 P3 against `ed822a2`:
   fresh recovery could erase already saved diagnosticDetails. Before changing
   production code, a real Windows FileShare.Read-only journal lease reproduced
@@ -27,6 +33,9 @@ All notable changes to OpennessLLM are recorded in this file.
   unchanged. The same executable passes both full runs (118/118, short and
   69-character nested output prefixes); the earlier reviewer's unchanged probe
   passes 10/10. No new live TIA/PLC validation is claimed for this offline change.
+
+### Earlier changes on this branch
+
 - Version 0.12.12 addresses the nonblocking review-b3 P3 against `e16bedc`.
   The reviewer closed the previous P1/P2. Strengthening the existing real-I/O
   retention test reproduced missing durable details for BOTH sync and apply:

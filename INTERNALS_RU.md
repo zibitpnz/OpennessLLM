@@ -483,7 +483,7 @@ allowlist сравниваются с моделью уже под read-lock. Me
 в hash-bound ZIP; commit использует пакет, а не изменяемое дерево staging. Тот же
 контракт применяется к post-save apply validation workspace.
 
-До первого move создаётся `.opennessllm-publication-transaction.json` schema 4.
+До первого move создаётся `.opennessllm-publication-transaction.json` schema 5.
 Его exact contract связывает owner, canonical workspace, operation, transaction
 ID, staging owner, immutable package SHA-256, installation/result paths и все old/new
 fingerprints. Installation path фиксирован как дочерний
@@ -515,14 +515,28 @@ workspace с `WorkspaceRows` ИСХОДНОГО bundle, переданного s
 восстановленным. Active data никогда не удаляется/перезаписывается этим abort.
 Заново созданный active path требует ручного устранения конфликта с сохранением
 обеих сторон. `capture-aborted` остаётся идемпотентным при повторном recovery.
-После `captured-verified` действует прежняя строгая old/new fingerprint recovery.
+После `captured-verified` действует строгая old/new fingerprint recovery с
+identity-bound захватом компонентов при rollback, описанным ниже.
 API требует `FILE_ID_INFO` и same-volume rename; unsupported filesystem fail
 closed. Filesystem identity не означает доступность durable TIA object IDs.
 
-Rollback перемещает доказанный новый компонент в принадлежащий транзакции
-`_rollback` и возвращает backup через rename. Это сохраняет возможность повторного
-recovery даже при завершении процесса между этими действиями; рекурсивное
-удаление активного компонента при rollback не применяется. Общая защита внутри
+При rollback предварительный fingerprint active path не считается достаточным:
+редактор может изменить объект после проверки. `DisplacePublicationComponentForRollback`
+записывает его Windows file ID в журнал, переносит сам объект по открытому handle
+в постоянный `backupDir\_rollback` и только затем проверяет ID и fingerprint
+захваченного объекта под read leases. Journal schema `5` содержит четыре поля
+rollback capture identity для `_root`, manifests и `_metadata`. Поздняя правка,
+замена или пропажа объекта останавливает recovery с сохранением журнала, старого
+baseline и захваченных данных. При повторе проверяется также pending capture,
+если процесс завершился между записью ID и rename.
+
+Старый backup возвращается через rename после успешной проверки захвата. Все
+rollback captures повторно проверяются перед завершением восстановления и
+никогда не удаляются самим recovery даже после успеха: редактор может дописать
+данные через старый handle уже после проверки. `_rollback` находится вне
+удаляемого staging, а внешний cleanup сохраняет и вложенные rollback backups
+после удаления их журнала. Эти данные требуют ручной сверки перед удалением.
+Рекурсивное удаление активного компонента при rollback не применяется. Защита внутри
 cleanup helpers сохраняет staging/package/owner marker на исходных путях при
 любом оставшемся journal в родительской цепочке или внутри удаляемого дерева.
 Unreadable/malformed journal также запрещает cleanup и quarantine. Поэтому
@@ -534,11 +548,39 @@ report после commit не требует повторять write или в�
 `FinalizeCommittedApplyPublication` разделяет authoritative verification и
 диагностику: реальная ошибка verification пробрасывается, а ошибка записи
 completion/after-check report возвращается как diagnostic failure. Во всех
-последующих диагностических шагах сохраняется уже обнаруженная ошибка.
+последующих диагностических шагах ошибки объединяются, а не подменяют друг друга.
 Заблокированный completion может временно остаться `not_committed`; решение
 `committed` в оставшемся journal имеет приоритет. Recovery проверяет установленные
-компоненты и обновляет completion до удаления journal/package. Для
-`apply-publication` после возможного Save старый authorization marker никогда не
+компоненты и обновляет completion до удаления journal/package.
+
+`TryRecoverIncompletePublication` возвращает явный исход `Committed`,
+`RolledBack`, `CaptureAborted`, `Unresolved` или `NoJournal`. Publisher принимает
+подтверждённый commit только при совпадении recovered transaction ID. Ошибка
+повторного открытия committed-журнала для flush после атомарной замены не
+доказывает rollback. При обработке ошибки публикации подтверждённый по диску
+commit передаётся caller через `PublicationCommittedDiagnosticException`,
+сохраняя обязательную apply verification.
+Нечитаемый журнал или ошибка installed-state verification оставляют исход
+`Unresolved`; вход новой clone-команды не продолжает работу при ошибке recovery.
+
+Completion result schema `2` добавляет плоскую строку `diagnosticDetails` с полным
+представлением исключений: inner causes, AggregateException siblings и доступные
+стеки. Перед перезаписью `ReadPublicationDiagnosticHistory` читает предыдущий
+completion, проверяет canonical result path, owner, поддерживаемую схему, точный
+набор полей, transactionId, operation, workspace и backup. Подходящий schema-1
+result обновляется без выдумывания подробностей. Чужой, повреждённый или недоступный
+result не перезаписывается молча; committed recovery оставляет journal/package
+для разрешения диагностического конфликта.
+
+`MergePublicationDiagnosticHistory` сохраняет прежний текст при отсутствии новой
+ошибки, добавляет независимые новые подробности и не дублирует идентичные повторы.
+Новый result или отдельный процесс не обязан иметь прежние exception objects:
+история берётся с диска. Поэтому `committed/recovered` и непустые details совместимы.
+История диагностическая: она не участвует в выборе commit/rollback, который уже
+определён журналом и проверкой компонентов. Текущие версии всех контрактов:
+[README](README.md#current-version-and-compatibility).
+
+Для `apply-publication` после возможного Save старый authorization marker никогда не
 восстанавливается. Cleanup `_sync-staging` и `_apply-validation` имеет ownership
 marker, quarantine и audit; его ошибка после commit требует только локальной
 confidentiality cleanup, не recovery TIA project.
