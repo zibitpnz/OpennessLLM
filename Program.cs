@@ -19,16 +19,16 @@ using Microsoft.Win32.SafeHandles;
 [assembly: AssemblyProduct("OpennessLLM")]
 [assembly: AssemblyCompany("Zibitpnz")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Zibitpnz")]
-[assembly: AssemblyVersion("0.12.12.0")]
-[assembly: AssemblyFileVersion("0.12.12.0")]
+[assembly: AssemblyVersion("0.12.13.0")]
+[assembly: AssemblyFileVersion("0.12.13.0")]
 
 namespace OpennessLLM
 {
     internal static class Program
     {
         private const string ProductName = "OpennessLLM";
-        private const string ProductVersion = "0.12.12";
-        private const string ProductVersionDate = "2026-09-06";
+        private const string ProductVersion = "0.12.13";
+        private const string ProductVersionDate = "2026-09-07";
         private const string ProductCreator = "Zibitpnz";
         private const string CloneCheckBundleSchemaVersion = "7";
         private const string CloneMatcherRevision = "global-object-correlation-v5";
@@ -18059,6 +18059,12 @@ namespace OpennessLLM
         {
             if (result == null || string.IsNullOrWhiteSpace(result.CompletionResultPath)) return;
             EnsurePathInside(result.CompletionResultPath, result.BackupDir);
+            // Completion is diagnostic ONLY. Recovery decides the outcome from
+            // the journal and installed components BEFORE entering this writer.
+            // A new result/process has no old exception objects, so preserve the
+            // bound on-disk history independently of the current attempt status.
+            string previousDetails = ReadPublicationDiagnosticHistory(result);
+            string currentDetails = result.DiagnosticFailure == null ? string.Empty : result.DiagnosticFailure.ToString();
             Directory.CreateDirectory(result.BackupDir);
             WriteFlatJsonObjectAtomically(
                 result.CompletionResultPath,
@@ -18073,12 +18079,54 @@ namespace OpennessLLM
                     { "backupDir", result.BackupDir },
                     { "diagnosticStatus", diagnosticStatus },
                     { "message", EmptyIfNull(message) },
-                    // Keep the flat summary contract, but persist ALL inner
-                    // exceptions (including AggregateException siblings).
-                    { "diagnosticDetails", result.DiagnosticFailure == null ? string.Empty : result.DiagnosticFailure.ToString() },
+                    { "diagnosticDetails", MergePublicationDiagnosticHistory(previousDetails, currentDetails) },
                     { "updatedUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture) }
                 });
             FlushFileToDisk(result.CompletionResultPath);
+        }
+
+        private static string ReadPublicationDiagnosticHistory(PublicationCommitResult result)
+        {
+            if (!EqualsIgnoreCase(Path.GetFullPath(result.CompletionResultPath), Path.GetFullPath(Path.Combine(result.BackupDir, "publication-completion.json"))))
+                throw new InvalidDataException("Publication completion path is not bound to its backup directory.");
+            string text;
+            // Do not treat access/parse/binding failures as missing history:
+            // leave the existing report intact and let the caller retain the
+            // journal/package for retry. Missing files are normal on first write.
+            try { text = File.ReadAllText(result.CompletionResultPath, Encoding.UTF8); }
+            catch (FileNotFoundException) { return string.Empty; }
+            catch (DirectoryNotFoundException) { return string.Empty; }
+            Dictionary<string, string> previous = ParseStrictFlatJsonObject(text, result.CompletionResultPath);
+            string schema = SidecarValue(previous, "resultSchemaVersion");
+            if (schema != "1" && schema != PublicationResultSchemaVersion)
+                throw new InvalidDataException("Unsupported publication completion result schema; diagnostic history was not overwritten.");
+            List<string> keys = new List<string> { "owner", "resultSchemaVersion", "transactionId", "operation", "state",
+                "workspacePath", "backupDir", "diagnosticStatus", "message", "updatedUtc" };
+            if (schema == "2") keys.Add("diagnosticDetails");
+            ValidateExactFlatObjectKeys(previous, keys, "publication completion result");
+            Guid transactionId;
+            if (SidecarValue(previous, "owner") != ProductName
+                || !Guid.TryParseExact(SidecarValue(previous, "transactionId"), "N", out transactionId)
+                || SidecarValue(previous, "transactionId") != result.TransactionId
+                || SidecarValue(previous, "operation") != result.Operation
+                || !Path.IsPathRooted(SidecarValue(previous, "workspacePath"))
+                || !Path.IsPathRooted(SidecarValue(previous, "backupDir"))
+                || !EqualsIgnoreCase(Path.GetFullPath(previous["workspacePath"]).TrimEnd('\\', '/'), Path.GetFullPath(result.WorkspacePath).TrimEnd('\\', '/'))
+                || !EqualsIgnoreCase(Path.GetFullPath(previous["backupDir"]).TrimEnd('\\', '/'), Path.GetFullPath(result.BackupDir).TrimEnd('\\', '/')))
+                throw new InvalidDataException("Publication completion belongs to a different owner, transaction, operation or workspace; diagnostic history was not overwritten.");
+            // Schema 1 predates detailed exceptions. Upgrade its bound record,
+            // but do not invent historical exception details from its summary.
+            return schema == "1" ? string.Empty : previous["diagnosticDetails"];
+        }
+
+        private static string MergePublicationDiagnosticHistory(string previous, string current)
+        {
+            if (string.IsNullOrEmpty(previous)) return current;
+            if (string.IsNullOrEmpty(current) || previous.Contains(current)) return previous;
+            if (current.Contains(previous)) return current;
+            // Retain both full representations when fresh diagnostics do not
+            // already include the earlier causes. Identical retries are stable.
+            return previous + Environment.NewLine + "--- Additional publication diagnostics ---" + Environment.NewLine + current;
         }
 
         private static void UpdatePublicationCompletionResultBestEffort(
@@ -29865,6 +29913,9 @@ namespace OpennessLLM
             RunSelfTestCase(results, outDir, "clone-publication-commit-verification-failure", SelfTestPublicationCommitVerificationFailure);
             RunSelfTestCase(results, outDir, "clone-publication-commit-diagnostic-retention", SelfTestPublicationCommitDiagnosticRetention);
             RunSelfTestCase(results, outDir, "clone-publication-diagnostic-details-json", SelfTestPublicationDiagnosticDetailsJson);
+            RunSelfTestCase(results, outDir, "clone-publication-diagnostic-history-recovery", SelfTestPublicationDiagnosticHistoryRecovery);
+            RunSelfTestCase(results, outDir, "clone-publication-diagnostic-history-binding", SelfTestPublicationDiagnosticHistoryBinding);
+            RunSelfTestCase(results, outDir, "clone-publication-diagnostic-history-authority", SelfTestPublicationDiagnosticHistoryAuthority);
             RunSelfTestCase(results, outDir, "clone-publication-journal-forgery", SelfTestClonePublicationJournalForgery);
             RunSelfTestCase(results, outDir, "clone-publication-committed-report-failure", SelfTestClonePublicationCommittedReportFailure);
             RunSelfTestCase(results, outDir, "apply-clone-multi-plc-fail-closed", SelfTestApplyCloneMultiPlcFailClosed);
@@ -34071,6 +34122,233 @@ namespace OpennessLLM
             AssertTrue(missingDurableDetails.Count == 0, "completion JSON must retain both original IO errors after retry: " + string.Join(" | ", missingDurableDetails));
         }
 
+        private static string CreateSelfTestRetainedCommittedDiagnostic(
+            string workspace, string operation, out string staging, out string backup)
+        {
+            string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+            FileStream journalLock = null;
+            using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+            {
+                try
+                {
+                    _publicationCommitJournalTestHook = delegate(string phase)
+                    {
+                        if (phase == "after-replace-before-flush")
+                            journalLock = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    };
+                    PublicationCommitResult result = null;
+                    try { result = CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256, null); }
+                    catch (PublicationCommittedDiagnosticException ex)
+                    {
+                        result = ex.CommitResult;
+                        AggregateException errors = ex.InnerException as AggregateException;
+                        AssertTrue(errors != null && errors.InnerExceptions.Count == 2 && errors.InnerExceptions.All(error => error is IOException), "real read-only journal lock must fail flush AND deletion");
+                    }
+                    finally { _publicationCommitJournalTestHook = null; lease.Dispose(); }
+                    AssertTrue(journalLock != null && result != null && result.DiagnosticFailure != null, "committed publication must retain actual IO diagnostics");
+                    Exception ignored;
+                    AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out ignored), "completion must be writable while only the journal is locked");
+                    AssertTrue(ignored == null && File.Exists(journalPath), "successful diagnostics must not require deleting the locked journal");
+                    AssertEqual("retained-for-publication-journal", (operation == "sync-clone" ? CleanupSyncStaging(staging) : CleanupApplyValidationWorkspace(staging)).Status, "retained committed journal must keep its staging");
+                    string completionPath = Path.Combine(backup, "publication-completion.json");
+                    Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                    string details = completion["diagnosticDetails"];
+                    AssertTrue(completion["state"] == "committed_with_diagnostic_failure" && completion["diagnosticStatus"] == "failed"
+                        && details.Contains("System.IO.IOException") && details.Contains(PublicationTransactionFileName), "first command must have successfully saved the actual journal diagnostic history");
+                    File.Copy(completionPath, Path.Combine(workspace, "completion-before-recovery.json"));
+                    return details; // No result/exception object escapes this first-command scope.
+                }
+                finally
+                {
+                    _publicationCommitJournalTestHook = null;
+                    if (journalLock != null) journalLock.Dispose();
+                }
+            }
+        }
+
+        private static int RunSelfTestPublicationRecoveryProcess(string workspace)
+        {
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(
+                Assembly.GetExecutingAssembly().Location, "workspace-lock-probe --out \"" + workspace + "\"")
+            {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(start))
+            {
+                System.Threading.Tasks.Task<string> output = process.StandardOutput.ReadToEndAsync();
+                System.Threading.Tasks.Task<string> error = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(15000))
+                {
+                    process.Kill();
+                    process.WaitForExit();
+                    throw new InvalidOperationException("Diagnostic-history recovery child timed out.");
+                }
+                WriteTextFile(Path.Combine(workspace, "recovery-child.log"), output.Result + error.Result);
+                return process.ExitCode;
+            }
+        }
+
+        private static void SelfTestPublicationDiagnosticHistoryRecovery(string caseDir)
+        {
+            List<string> failures = new List<string>();
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            foreach (bool childProcess in new[] { false, true })
+            {
+                string workspace = Path.Combine(caseDir, (operation == "sync-clone" ? "s" : "a") + (childProcess ? "p" : "m"));
+                string staging, backup;
+                string before = CreateSelfTestRetainedCommittedDiagnostic(workspace, operation, out staging, out backup);
+                string active = ActivePublicationFingerprint(workspace);
+                if (childProcess) AssertEqual("0", RunSelfTestPublicationRecoveryProcess(workspace).ToString(CultureInfo.InvariantCulture), "fresh process must recover from disk only");
+                else
+                {
+                    PublicationRecoveryResult recovered = RecoverIncompletePublication(workspace, true);
+                    AssertTrue(recovered.Outcome == PublicationRecoveryOutcome.Committed && recovered.Failure == null
+                        && recovered.CommitResult.DiagnosticFailure == null, "fresh recovery must not depend on the original exception objects");
+                }
+                // NO write with the old result after recovery: inspect what the
+                // fresh recovery invocation/process actually persisted.
+                string completionPath = Path.Combine(backup, "publication-completion.json");
+                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                bool preserved = completion["diagnosticDetails"] == before;
+                Console.WriteLine("Recovery history " + operation + "/" + (childProcess ? "process" : "managed")
+                    + ": beforeLength=" + before.Length + ", afterLength=" + completion["diagnosticDetails"].Length + ", preserved=" + preserved);
+                if (!preserved) failures.Add(operation + "/" + childProcess);
+                AssertEqual("committed", completion["state"], "current recovery outcome must remain committed");
+                AssertEqual("recovered", completion["diagnosticStatus"], "current recovery status may change independently of historical diagnostics");
+                AssertEqual(active, ActivePublicationFingerprint(workspace), "history preservation must not alter the installed baseline");
+                AssertEqual("old-root\n", File.ReadAllText(Path.Combine(backup, "_root", "old.scl")), "old source backup must remain intact");
+                AssertTrue(!File.Exists(Path.Combine(workspace, PublicationTransactionFileName)) && !Directory.Exists(staging), "successful recovery must finalize journal and staging");
+                string completedHash = ComputeFileSha256(completionPath);
+                using (AcquireCloneWorkspaceLock(workspace, "history-idempotence")) { }
+                AssertEqual(completedHash, ComputeFileSha256(completionPath), "subsequent no-journal recovery must be idempotent");
+            }
+            AssertTrue(failures.Count == 0, "fresh recovery must preserve already saved diagnostic history: " + string.Join(", ", failures));
+        }
+
+        private static void SelfTestPublicationDiagnosticHistoryBinding(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                int index = 0;
+                foreach (string mutation in new[] { "owner", "schema", "transactionId", "operation", "workspacePath", "backupDir",
+                    "relative-workspace", "relative-backup", "missing", "unknown", "malformed", "duplicate" })
+                {
+                    string workspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", (++index).ToString(CultureInfo.InvariantCulture));
+                    string staging, backup;
+                    string history = CreateSelfTestRetainedCommittedDiagnostic(workspace, operation, out staging, out backup);
+                    string completionPath = Path.Combine(backup, "publication-completion.json");
+                    string original = File.ReadAllText(completionPath);
+                    Dictionary<string, string> foreign = ParseStrictFlatJsonObject(original, completionPath);
+                    foreign["diagnosticDetails"] = "FOREIGN-DIAGNOSTIC-MUST-NOT-BE-INHERITED";
+                    switch (mutation)
+                    {
+                        case "owner": foreign["owner"] = "foreign-tool"; break;
+                        case "schema": foreign["resultSchemaVersion"] = "999"; break;
+                        case "transactionId": foreign["transactionId"] = Guid.NewGuid().ToString("N"); break;
+                        case "operation": foreign["operation"] = operation == "sync-clone" ? "apply-publication" : "sync-clone"; break;
+                        case "workspacePath": foreign["workspacePath"] = workspace + "-foreign"; break;
+                        case "backupDir": foreign["backupDir"] = backup + "-foreign"; break;
+                        case "relative-workspace": foreign["workspacePath"] = "."; break;
+                        case "relative-backup": foreign["backupDir"] = "relative-backup"; break;
+                        case "missing": foreign.Remove("diagnosticDetails"); break;
+                        case "unknown": foreign["unexpected"] = "foreign"; break;
+                    }
+                    WriteFlatJsonObjectAtomically(completionPath, foreign);
+                    if (mutation == "malformed") WriteTextFile(completionPath, "{broken completion");
+                    if (mutation == "duplicate") WriteTextFile(completionPath, "{\"owner\":\"OpennessLLM\",\"owner\":\"foreign\"}");
+                    File.Copy(completionPath, Path.Combine(workspace, "completion-rejected.json"));
+                    string rejectedHash = ComputeFileSha256(completionPath);
+                    string active = ActivePublicationFingerprint(workspace);
+                    string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                    string journalHash = ComputeFileSha256(journalPath);
+                    PublicationRecoveryResult recovered = TryRecoverIncompletePublication(workspace, true);
+                    AssertTrue(recovered.Outcome == PublicationRecoveryOutcome.Committed && recovered.Failure is InvalidDataException,
+                        "untrusted diagnostics must not change disk-verified commit into rollback: " + mutation);
+                    AssertEqual(rejectedHash, ComputeFileSha256(completionPath), "untrusted completion must not be overwritten or inherited");
+                    AssertTrue(RunSelfTestPublicationRecoveryProcess(workspace) != 0, "new command must stop when prior completion cannot be finalized");
+                    AssertEqual(rejectedHash, ComputeFileSha256(completionPath), "fresh process must also preserve rejected completion");
+                    AssertEqual(journalHash, ComputeFileSha256(journalPath), "diagnostic conflict must retain the same committed journal");
+                    AssertTrue(Directory.Exists(staging), "diagnostic conflict must retain the publication package");
+                    AssertEqual(active, ActivePublicationFingerprint(workspace), "diagnostic conflict must not change the installed baseline");
+                    // Explicit repair of this test-only foreign file; the runtime
+                    // never silently replaces it or imports its diagnostic text.
+                    WriteTextFile(completionPath, original);
+                    recovered = RecoverIncompletePublication(workspace, true);
+                    Dictionary<string, string> completed = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                    AssertTrue(recovered.Outcome == PublicationRecoveryOutcome.Committed && recovered.Failure == null
+                        && completed["diagnosticDetails"] == history && !Directory.Exists(staging) && !File.Exists(journalPath),
+                        "restoring bound completion must allow a history-preserving retry");
+                    Console.WriteLine("Recovery history binding " + operation + "/" + mutation + ": rejected unchanged, retry preserved history");
+                }
+                // A bound legacy schema-1 report has no diagnosticDetails field.
+                string legacyWorkspace = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a", "legacy");
+                string legacyStaging, legacyBackup;
+                CreateSelfTestRetainedCommittedDiagnostic(legacyWorkspace, operation, out legacyStaging, out legacyBackup);
+                string legacyPath = Path.Combine(legacyBackup, "publication-completion.json");
+                Dictionary<string, string> legacy = ParseStrictFlatJsonObject(File.ReadAllText(legacyPath), legacyPath);
+                legacy["resultSchemaVersion"] = "1";
+                legacy.Remove("diagnosticDetails");
+                WriteFlatJsonObjectAtomically(legacyPath, legacy);
+                AssertEqual("0", RunSelfTestPublicationRecoveryProcess(legacyWorkspace).ToString(CultureInfo.InvariantCulture), "bound schema 1 must remain recoverable");
+                legacy = ParseStrictFlatJsonObject(File.ReadAllText(legacyPath), legacyPath);
+                AssertTrue(legacy["resultSchemaVersion"] == "2" && legacy["diagnosticDetails"] == string.Empty
+                    && legacy["state"] == "committed" && legacy["diagnosticStatus"] == "recovered", "legacy upgrade must not invent exception history");
+            }
+        }
+
+        private static void SelfTestPublicationDiagnosticHistoryAuthority(string caseDir)
+        {
+            foreach (string operation in new[] { "sync-clone", "apply-publication" })
+            {
+                string opDir = Path.Combine(caseDir, operation == "sync-clone" ? "s" : "a");
+                string workspace = Path.Combine(opDir, "conflict");
+                string staging, backup;
+                CreateSelfTestRetainedCommittedDiagnostic(workspace, operation, out staging, out backup);
+                string completionPath = Path.Combine(backup, "publication-completion.json");
+                string completionHash = ComputeFileSha256(completionPath);
+                WriteTextFile(Path.Combine(workspace, "_root", "new.scl"), "later-editor-bytes\n");
+                string edited = ActivePublicationFingerprint(workspace);
+                PublicationRecoveryResult conflict = TryRecoverIncompletePublication(workspace, true);
+                AssertTrue(conflict.Outcome == PublicationRecoveryOutcome.Unresolved && conflict.CommitResult == null
+                    && conflict.Failure != null, "saved committed completion/history must not authorize a modified installed baseline");
+                AssertEqual(edited, ActivePublicationFingerprint(workspace), "failed verification must preserve editor bytes");
+                AssertEqual(completionHash, ComputeFileSha256(completionPath), "failed verification must not touch completion history");
+                AssertTrue(File.Exists(Path.Combine(workspace, PublicationTransactionFileName)) && Directory.Exists(staging), "verification conflict must retain journal/package");
+
+                workspace = Path.Combine(opDir, "precommit");
+                string journalPath = Path.Combine(workspace, PublicationTransactionFileName);
+                using (SyncStagingLease lease = CreateSelfTestPublicationTransaction(workspace, operation, out staging, out backup))
+                {
+                    completionPath = Path.Combine(backup, "publication-completion.json");
+                    bool stopped = false;
+                    try
+                    {
+                        CommitStagedSyncWorkspace(workspace, staging, backup, operation, lease.PackagePath, lease.PackageSha256,
+                            delegate(string phase)
+                            {
+                                if (phase != "metadata-installed") return;
+                                Dictionary<string, string> completion = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                                completion["state"] = "committed";
+                                completion["diagnosticStatus"] = "ok";
+                                completion["diagnosticDetails"] = "diagnostic text is not commit evidence";
+                                WriteFlatJsonObjectAtomically(completionPath, completion);
+                                throw new PublicationCrashSimulationException("stop before committed journal", null);
+                            });
+                    }
+                    catch (PublicationCrashSimulationException) { stopped = true; }
+                    AssertTrue(stopped && File.Exists(journalPath), "test must retain a pre-commit journal despite a completion claiming commit");
+                }
+                PublicationRecoveryResult rollback = RecoverIncompletePublication(workspace, true);
+                AssertTrue(rollback.Outcome == PublicationRecoveryOutcome.RolledBack && rollback.Failure == null,
+                    "pre-commit journal must cause rollback regardless of claimed completion outcome");
+                Dictionary<string, string> rolledBack = ParseStrictFlatJsonObject(File.ReadAllText(completionPath), completionPath);
+                AssertTrue(rolledBack["state"] == "not_committed" && rolledBack["diagnosticStatus"] == "rolled_back"
+                    && rolledBack["diagnosticDetails"] == "diagnostic text is not commit evidence", "history must remain diagnostic only");
+                AssertEqual("old-root\n", File.ReadAllText(Path.Combine(workspace, "_root", "old.scl")), "precommit must restore old baseline");
+            }
+        }
+
         private static void SelfTestPublicationDiagnosticDetailsJson(string caseDir)
         {
             foreach (string operation in new[] { "sync-clone", "apply-publication" })
@@ -34120,6 +34398,27 @@ namespace OpennessLLM
                 AssertEqual(persistedDetails, completion["diagnosticDetails"], "successful same-result retry must retain the complete saved diagnostic text");
                 AssertEqual("committed_with_diagnostic_failure", completion["state"], "diagnostic serialization must not alter the committed outcome");
                 AssertEqual("failed", completion["diagnosticStatus"], "successful retry must not erase earlier diagnostics");
+
+                // Discard all in-memory exceptions: persist a fresh result and
+                // then add unrelated later errors without losing on-disk history.
+                result = new PublicationCommitResult
+                {
+                    TransactionId = result.TransactionId, Operation = operation,
+                    WorkspacePath = workspace, BackupDir = backup, CompletionResultPath = result.CompletionResultPath
+                };
+                AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "fresh clean diagnostic write must succeed");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertEqual(persistedDetails, completion["diagnosticDetails"], "fresh clean result must preserve prior detailed history");
+                AssertEqual("ok", completion["diagnosticStatus"], "current successful status is independent of history");
+                IOException freshFailure = new IOException("fresh-command failure: \"quoted\"\r\n\t\u03a9");
+                AssertTrue(!TryWriteCommittedPublicationDiagnostics(result, operation, delegate { throw freshFailure; }, out failure), "fresh writer failure must use best-effort history merge");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertTrue(completion["diagnosticDetails"].Contains(persistedDetails) && completion["diagnosticDetails"].Contains(freshFailure.ToString()), "both prior history and unrelated new full exception must survive");
+                string mergedDetails = completion["diagnosticDetails"];
+                for (int retry = 0; retry < 3; retry++)
+                    AssertTrue(TryWriteCommittedPublicationDiagnostics(result, operation, delegate { }, out failure), "repeated diagnostic retry must succeed");
+                completion = ParseStrictFlatJsonObject(File.ReadAllText(result.CompletionResultPath), result.CompletionResultPath);
+                AssertEqual(mergedDetails, completion["diagnosticDetails"], "identical retries must not duplicate persisted history");
             }
         }
 

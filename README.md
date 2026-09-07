@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.12`. Created by `Zibitpnz`.
+Current version: `0.12.13`. Created by `Zibitpnz`.
 
 ## What It Does
 
@@ -384,9 +384,18 @@ still runs its mandatory post-commit verification. Original I/O diagnostics are
 preserved even if later completion/report writes fail too. Completion result
 schema `2` adds the flat string `diagnosticDetails`: exception types, messages,
 inner causes and available stack traces, including all aggregate siblings. The
-existing `message` remains a concise summary; `diagnosticDetails` is empty when
-there is no diagnostic exception. Successful same-result retries retain this
-text. This is an optional diagnostic record, not recovery authorization; journal
+existing `message` remains a concise summary. `diagnosticDetails` retains the
+transaction's saved history even when a new result/process has no exceptions;
+it is empty only when neither prior details nor a current exception exists.
+Current status can become `committed/recovered` while historical details remain.
+Later unrelated errors are appended without duplicating identical retries.
+Before inheriting history, the writer validates the existing record's owner,
+supported schema, exact fields, transaction, operation, workspace and backup
+binding. Bound schema-1 completion records upgrade without inventing details.
+An unreadable, malformed or foreign completion is not silently overwritten;
+committed recovery retains the journal/package and blocks new commands until
+the diagnostic conflict is resolved. This is an optional diagnostic record,
+not recovery authorization; journal
 schema `5`, check-bundle schema `7` and write policy v12 are unchanged. Details
 can include local file paths and should be handled like other diagnostic logs.
 An unreadable journal

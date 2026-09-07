@@ -4,6 +4,29 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+- Version 0.12.13 addresses the nonblocking review-b4 P3 against `ed822a2`:
+  fresh recovery could erase already saved diagnosticDetails. Before changing
+  production code, a real Windows FileShare.Read-only journal lease reproduced
+  loss of all 2,770 saved characters in both sync and apply, each with managed
+  recovery and a separate recovery process (115 passed, 1 failed).
+- Completion writes now preserve bound on-disk diagnostic history independently
+  of the current attempt's status/exception objects, including fresh processes.
+  Later unrelated diagnostics are retained alongside earlier details; identical
+  retries do not duplicate the text. Owner, supported schema, exact fields,
+  transaction, operation, workspace and backup binding are checked before
+  inheriting history. Foreign/malformed/unreadable completion is not silently
+  replaced; committed recovery retains journal/package for explicit resolution.
+  Bound schema-1 completion records upgrade without invented exception details.
+- New regression coverage exercises real flush AND journal-deletion failures,
+  fresh managed/process recovery without rewriting an old result, 24 binding/
+  format rejection cases with separate-process retries, schema-1 compatibility,
+  unrelated later errors and retry stability. Authority-negative tests confirm
+  that a completion claiming commit cannot override a pre-commit journal or
+  failed installed-state verification. Completion remains diagnostic only;
+  result schema 2, journal schema 5, bundle schema 7 and write policy v12 are
+  unchanged. The same executable passes both full runs (118/118, short and
+  69-character nested output prefixes); the earlier reviewer's unchanged probe
+  passes 10/10. No new live TIA/PLC validation is claimed for this offline change.
 - Version 0.12.12 addresses the nonblocking review-b3 P3 against `e16bedc`.
   The reviewer closed the previous P1/P2. Strengthening the existing real-I/O
   retention test reproduced missing durable details for BOTH sync and apply:
