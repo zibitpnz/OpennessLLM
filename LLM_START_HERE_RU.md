@@ -11,6 +11,11 @@
 
 ## 1. Сначала понять инструмент
 
+Актуальная версия исходников и таблица схем находятся в
+[README](README.md#current-version-and-compatibility). Проверять EXE нужно в той
+же копии инструмента. После обновления исходников или переключения ветки сначала
+выполнить `build.cmd`: `run.cmd` не пересобирает уже существующий EXE.
+
 Выполнить:
 
 ```cmd
@@ -136,8 +141,9 @@ Runtime-запись в PLC возможна, но это отдельный о�
 ```text
 check-clone
 изменить файлы в CLONE_PROJECT
+check-clone повторно после изменений
 apply-clone dry-run
-apply-clone --apply
+apply-clone --apply --save
 compile-block или compile-all
 check-clone
 sync-clone, если нужно принять новое состояние в clone baseline
@@ -147,14 +153,17 @@ sync-clone, если нужно принять новое состояние в 
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+REM Изменить source/sidecar, затем обязательно обновить bundle:
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 .\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-`apply-clone` и `compile-all` являются write-командами. Реальные изменения
-требуют явный `--apply`.
+`apply-clone` и `compile-all` являются write-командами. Для `apply-clone`
+реальные изменения требуют `--apply --save` и свежий check после всех локальных
+изменений.
 
 ## 6. Диагностика компиляции
 

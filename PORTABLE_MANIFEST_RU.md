@@ -1,11 +1,28 @@
 # Portable manifest для OpennessLLM
 
-Дата: 2026-08-27.
+Дата версии: 2026-09-07.
 
 Имя инструмента: `OpennessLLM`.
-Текущая версия: `0.12.3`.
+Текущая версия: `0.12.13`.
 Создано: `Zibitpnz`.
 Текущая переносимая папка инструмента: `OpennessLLM`.
+
+Актуальные версии схем и write policy приведены в
+[README](README.md#current-version-and-compatibility). Документация относится к
+исходникам этой копии инструмента; старый EXE или другая ветка могут иметь другую
+версию. После переноса исходников выполнить `build.cmd` и `run.cmd version` из
+папки новой копии. `run.cmd` не пересобирает уже существующий EXE автоматически.
+
+В текущей версии поздние правки при rollback сохраняются в постоянном `_rollback`
+внутри backup транзакции, а результат commit проверяется по журналу и
+установленным компонентам. Completion schema `2` сохраняет полные подробности
+ошибок и их историю при recovery новым процессом. Publication journal schema `5`,
+check-bundle schema `7`, write policy `clone-write-policy-v12`. После обновления
+нужен свежий `check-clone`; незавершённые транзакции со старым журналом требуют
+ручного разбора с сохранением evidence, а не удаления файлов ради продолжения.
+
+Следующие упоминания старых версий обозначают начало поддержки возможностей,
+а не текущую версию переносимого инструмента.
 
 Начиная с версии `0.12.2`, переносимый инструмент содержит исправление `sync-clone`:
 новые блоки, добавленные в TIA Portal и принятые в baseline, сохраняют
@@ -104,7 +121,7 @@ C:\TIA_HMI_IMPORT_PROBE
 
 ```cmd
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
 Инструмент больше не генерирует PLC XML для записи в проект.

@@ -36,4 +36,6 @@ jobs:
         with:
           name: self-test-reports
           path: out/self-test-ci
+          # Only generated offline fixtures; include transaction/owner journals.
+          include-hidden-files: true
           if-no-files-found: warn

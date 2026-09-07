@@ -8,7 +8,8 @@ and `CHANGELOG.md`.
 `OpennessLLM` is a C#/.NET Framework command-line tool for LLM-assisted TIA
 Portal Openness engineering work.
 
-Version: `0.12.3`.
+Version: `0.12.13` (2026-09-07). Current compatibility contracts are listed in
+[README](README.md#current-version-and-compatibility).
 
 Created by: `Zibitpnz`.
 
@@ -30,6 +31,10 @@ OpennessLLM\bin\OpennessLLM.exe
 .\OpennessLLM\run.cmd version
 .\OpennessLLM\run.cmd --version
 ```
+
+Use the intended checkout directory. After updating sources or switching
+branches, run `build.cmd`: the run wrapper does not rebuild an existing EXE.
+Version checks and builds do not attach to TIA Portal.
 
 ## Local Tests
 
@@ -54,16 +59,32 @@ Production PLC writes go through guarded clone source workflow:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+REM Edit/add/delete/rename source and sidecar files, then refresh the bundle:
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-`apply-clone --apply` keeps the existing safety gates: clean baseline,
-source-blocker gate, stale source gate, backup requirement, after-apply check,
-and explicit `--apply` protection.
+`apply-clone --apply --save` holds `TiaPortal.ExclusiveAccess` across the complete
+transaction and requires an initially clean project unless the high-friction
+dirty-project override is explicitly recorded. It gates the complete report,
+validates exact per-action postconditions, restricts reconciliation to the
+immutable plan, compiles before Save, rechecks fresh pre/post-save inventories,
+and only then publishes the durable baseline. Clone-only sources require a
+sidecar with `softwarePath` and `sourceOrigin=explicit-new-local-source`.
+
+Current publication recovery preserves late editor changes in the backup's
+permanent `_rollback` directory. Journal schema `5`, bundle schema `7`, write
+policy `clone-write-policy-v12` and completion result schema `2` apply. The
+journal plus installed-state verification determine commit/rollback, never the
+completion report alone. `diagnosticDetails` retains full prior errors across
+fresh recovery even when the current status becomes `committed/recovered`.
+Foreign or malformed completion is not silently overwritten; committed recovery
+retains its journal/package until the diagnostic conflict is resolved. See
+[publication and recovery](README.md#clone-publication-and-recovery).
 
 When a block is added manually in TIA Portal and then accepted with
-`check-clone`/`sync-clone`, version `0.12.2` keeps `SoftwarePath` populated in
+`check-clone`/`sync-clone`, versions since `0.12.2` keep `SoftwarePath` populated in
 both `plc-blocks.csv` and `_metadata\blocks.jsonl`. Treat an empty
 `SoftwarePath` on a newly accepted block as a metadata issue to re-check before
 apply work.
@@ -82,8 +103,8 @@ Fast PLC block lookup from the local clone metadata:
 ## PLC Runtime Access
 
 Runtime commands provide direct S7comm / ISO-on-TCP access to the live PLC
-without opening TIA Portal. Version `0.12.1` specifically extends
-`plc-runtime-map` to classic non-optimized Global DB fields from `.db` files,
+without opening TIA Portal. Since version `0.12.1`, `plc-runtime-map` supports
+classic non-optimized Global DB fields from `.db` files,
 in addition to Instance DB fields through referenced FB declarations:
 
 The address `192.0.2.10` and DB/field names below are documentation-only
@@ -175,7 +196,7 @@ Real local cleanup requires explicit `--apply`.
 - Runtime project version is detected from `*.apNN`.
 - Matching TIA Openness PublicAPI is resolved by `--api-dir`,
   `TIA_OPENNESS_API_DIR`, registry, or default Portal path.
-- Version `0.10.6` accepts both `Siemens.Engineering.Base.dll` under
+- Since version `0.10.6`, the tool accepts both `Siemens.Engineering.Base.dll` under
   `PublicAPI\VXX\net48` and legacy `Siemens.Engineering.dll` under
   `PublicAPI\VXX`; the legacy path is for TIA Portal V20 machines.
 - `--software-path` focuses PLC clone/status commands on one software path/name.
