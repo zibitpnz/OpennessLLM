@@ -5,6 +5,7 @@
 /clean-local-last/
 
 # Local artifacts
+/reviews/
 *.zip
 *.tmp
 *.log
