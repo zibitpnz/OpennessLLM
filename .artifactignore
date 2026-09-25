@@ -1,7 +1,11 @@
 bin/
+obj/
 out/
+tests/
+reviews/
+artifacts/
 clean-local-last/
-.git/
+.git
 ../CLONE_PROJECT/
 *.zip
 *.tmp
