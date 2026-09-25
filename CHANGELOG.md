@@ -4,6 +4,46 @@ All notable changes to OpennessLLM are recorded in this file.
 
 ## Unreleased
 
+### 0.12.14
+
+- Keep full unique IDs in compact apply-validation and nested sync directory
+  names to avoid redundant path growth. A blocking `workspace-path-budget`
+  gate now checks projected sources, sidecars, publication, temporary and backup
+  paths in both dry-run and real apply before backup or TIA mutation. Paths that
+  cannot fit the legacy Windows limits require a shorter clone workspace and a
+  fresh check-clone; write-safety policy is now `clone-write-policy-v13`.
+- Preserve current-only unsupported-language inventory rows during sync/apply
+  publication. CSV/JSONL and metadata counts retain visual blocks such as Main
+  without inventing source files, hashes, sidecars or tracked provenance.
+  Two new offline regressions and extended publication-seal tests cover the
+  five-block create/reconcile flow, current identity, rejected source ambiguity,
+  inventory omission and provenance tampering (133 product tests total).
+- Fix deep-workspace path overflows in atomic sidecar backup and
+  nested sync publication extraction. Temporary JSON files use compact sibling
+  GUID names; new installation directories use `_i-<full transaction ID>`.
+  Recovery still accepts the old transaction-bound installation layout; all
+  package, owner, identity and path confinement checks remain mandatory.
+- Preserve failed sync row details in the propagated exception, even if writing
+  its report fails. Rejected apply after-checks retain diagnostic-only reports
+  and SHA-256 inventory under `_apply-reports/failed-<GUID>/` before cleanup.
+  Diagnostic retention failure cannot replace the primary rejection or allow Save.
+  Five new offline regressions cover deep create/promotion/reconciliation, atomic
+  replacement, report-write failure, diagnostic retention, and both recovery layouts
+  (131 product tests at that stage).
+- Fix the pure same-name FB renumber regression: no-ID FB201 -> FB203 was
+  emitted as conflicting added/removed rows instead of one metadata transition.
+  Same-name candidates now participate in the software/type-scoped global graph
+  alongside number candidates. Only mutually unique pairs are accepted; number
+  reuse, swaps and same-path shadows remain blocking ambiguities. Durable ID
+  continuity/replacement and tracked-source blocker gates remain enforced.
+- Add eight offline regressions covering metadata-only and content-changing
+  renumber, reused/swapped numbers and ordering, ID conflicts, PLC/type/provenance
+  scope, missing/unsupported sources, same-path shadows, and actual report/bundle
+  consumption followed by local sync with canonical paths and guard preservation.
+- Matcher revision is now `global-object-correlation-v6`; bundles from v5 require
+  a fresh `check-clone`. At that stage, bundle schema 7 and write policy v12
+  were unchanged; the later path-budget change above advances the policy to v13.
+
 ### 0.12.13
 
 - Aligned current-version labels in the command reference, handoff and portable

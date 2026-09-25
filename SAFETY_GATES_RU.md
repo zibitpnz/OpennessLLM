@@ -441,6 +441,25 @@ source bytes сначала копируются в immutable staging, зате�
 round-trip или sidecar marker `visualSourceVerified=true`, если workflow это
 предусматривает.
 
+### Workspace path-budget gate
+
+`apply-clone` с непустым планом проверяет блокирующий
+`before-write/workspace-path-budget` и в dry-run, и в реальном apply, до создания
+project backup и вызова TIA write methods. Проверяются полные будущие пути
+исходников/sidecar, validation, вложенной sync-публикации, временных файлов,
+отчётов и workspace-backup. Файлы: длина пути <260 единиц UTF-16; каталоги: <248.
+В бюджет входят имена блоков/групп и служебная вложенность, а не только `--out`.
+Пустой план проходит gate без оценки будущих путей записи; это не разрешение
+для следующего непустого плана. Настройки Windows long paths не отключают gate.
+
+При отказе смотреть `apply-clone-gate.csv` и
+`WORKSPACE_PATH_TOO_LONG_OR_INVALID`. Для workspace без незавершённых транзакций
+нужен более короткий путь с сохранением локальных правок/evidence, затем свежие
+`check-clone` и dry-run. При незавершённой транзакции сначала разобрать recovery
+по исходным путям. Нельзя удалять журнал/backup, менять policy в bundle или
+повторять прежнюю запись только ради обхода ограничения. Текущая policy —
+`clone-write-policy-v13`; [подробнее](README.md#workspace-path-limits).
+
 ## 9. PLC number gate
 
 TIA block numbers живут в number spaces:

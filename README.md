@@ -5,7 +5,7 @@ TIA Portal Openness. It inventories and exports engineering objects, maintains a
 reviewable filesystem clone of PLC/HMI sources, and applies approved changes
 through explicit safety gates.
 
-Current version: `0.12.13`. Created by `Zibitpnz`.
+Current version: `0.12.14`. Created by `Zibitpnz`.
 
 ## Current version and compatibility
 
@@ -22,14 +22,16 @@ actual checkout directory when using a separate clone or worktree.
 | Version date | `2026-09-07` |
 | Clone metadata schema | `4` |
 | Clone-check bundle schema | `7` |
-| Matcher revision | `global-object-correlation-v5` |
-| Write-safety policy | `clone-write-policy-v12` |
+| Matcher revision | `global-object-correlation-v6` |
+| Write-safety policy | `clone-write-policy-v13` |
 | Publication journal schema | `5` |
 | Publication completion result schema | `2` |
 
 Recent changes protect late editor changes in permanent rollback captures,
 distinguish disk-verified commit from rollback after I/O failures, and preserve
-full diagnostic history across fresh recovery processes. See
+full diagnostic history across fresh recovery processes. Compact internal paths
+and a pre-write path-budget gate reduce deep-workspace failures; this is not
+unlimited long-path support. See [workspace path limits](#workspace-path-limits),
 [publication and recovery](#clone-publication-and-recovery) and
 [version history](CHANGELOG.md). Older version numbers in the changelog and
 phrases such as "since version" identify when a feature was introduced; they
@@ -76,12 +78,18 @@ site's commissioning and functional-safety procedures.
 ## Project Status
 
 The tool is under active development. Interfaces and generated metadata may
-change between versions. Use the offline self-test before working with a new
-build:
+change between versions. Version `0.12.14` is an unreleased candidate; the source
+version is not an announcement of a published release. Use the offline self-test
+before working with a new build:
 
 ```powershell
 .\OpennessLLM\run.cmd self-test --out .\OpennessLLM\out\self-test-current
 ```
+
+The public CI builds the tool and runs its built-in offline self-test without
+TIA Portal or PLC access. Private acceptance tests, engineering projects and
+their reports are not part of the public distribution. A successful offline
+self-test does not replace validation in TIA Portal on the intended build.
 
 Version commands:
 
@@ -213,6 +221,10 @@ SDK attributes, SHA-256 hashes, and durable `SourceOrigin`. The latter records
 whether a source was actually exported (`exported-source`) or was only an
 unsupported-language inventory row (`inventory-only-unsupported`); legacy or
 contradictory missing-source rows fail closed as `unknown-orphaned`.
+Sync and apply publication preserve informational unsupported-language blocks in
+the complete inventory (`plc-blocks.csv`, `blocks.jsonl`, and `blockCount`). These
+rows use current snapshot attributes, empty source hashes and no source/sidecar;
+they do not become tracked source baselines or authorize writes to visual blocks.
 `apply-clone` refuses to
 write if a clone source file changed after the latest `check-clone`; run
 `check-clone` again after every edit, add, delete, rename, sidecar change, or
@@ -362,6 +374,28 @@ serialize through an exclusive `.opennessllm-workspace.lock` file inside the
 workspace; this control file is ignored by `init-workspace --force` backup
 classification and is never moved as generated content.
 
+### Workspace path limits
+
+For a nonempty plan, `apply-clone` checks `workspace-path-budget` in the
+`before-write` phase, in both dry-run and real apply, before project backup or
+TIA mutation. It checks projected source/sidecar, validation, nested publication,
+temporary, report and workspace-backup paths, not just the `--out` directory.
+The full absolute file path must be shorter than 260 UTF-16 code units;
+directory paths must be shorter than 248. There is no single maximum `--out`
+length: block/group names and internal nesting also consume the budget. Windows
+long-path settings do not bypass this .NET Framework/Win32 compatibility gate.
+An empty plan passes this gate without validating future write paths; that
+does not prove a later nonempty plan will fit.
+
+On `WORKSPACE_PATH_TOO_LONG_OR_INVALID`, inspect `apply-clone-gate.csv` for the
+specific path and cause. Use a shorter workspace path, retain local edits and
+evidence, then run a fresh `check-clone` and dry-run against the new location.
+Do not reuse the old bundle or edit its policy/path fields. If a publication
+transaction is unresolved, do not relocate the workspace or delete its
+journal/staging/backup to bypass recovery: first resolve it using the retained
+evidence at its original paths. A historical failure after a TIA write is not
+made safe to repeat merely by shortening the path.
+
 ### Clone publication and recovery
 
 A strict schema-5 publication journal binds its owner, canonical workspace,
@@ -431,7 +465,8 @@ An unreadable, malformed or foreign completion is not silently overwritten;
 committed recovery retains the journal/package and blocks new commands until
 the diagnostic conflict is resolved. This is an optional diagnostic record,
 not recovery authorization; journal
-schema `5`, check-bundle schema `7` and write policy v12 are unchanged. Details
+schema `5` and check-bundle schema `7` remain in use; the current write policy
+is `clone-write-policy-v13`. Details
 can include local file paths and should be handled like other diagnostic logs.
 An unreadable journal
 or failed installed-state verification remains unresolved, with evidence retained,
@@ -439,7 +474,7 @@ not a claimed rollback or successful commit. Mandatory recovery at command entry
 blocks new work while a previous transaction's completion cannot be finalized.
 Older journal schemas require manual inspection
 with all transaction evidence retained. Bundles from earlier tool/policy versions
-must be refreshed with `check-clone` (current policy: `clone-write-policy-v12`,
+must be refreshed with `check-clone` (current policy: `clone-write-policy-v13`,
 publication journal schema `5`, check-bundle schema still `7`).
 
 The journal and the abrupt-child regression test cover managed failures and

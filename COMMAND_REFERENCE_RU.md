@@ -1,6 +1,6 @@
 # OpennessLLM Command Reference
 
-Версия инструмента: `0.12.13` (2026-09-07).
+Версия инструмента: `0.12.14` (2026-09-07).
 
 Актуальные схемы и политика совместимости:
 [README](README.md#current-version-and-compatibility). Версия здесь относится к
@@ -545,7 +545,7 @@ journal/package, а вход новой команды блокируется д
 Подходящий completion schema `1` обновляется до schema `2` без выдумывания
 отсутствовавших подробностей. Completion остаётся диагностикой, не разрешением
 на commit. Старые схемы журнала требуют ручного разбора с сохранением всех файлов
-транзакции. Текущая write policy — `clone-write-policy-v12`, check-bundle schema
+транзакции. Текущая write policy — `clone-write-policy-v13`, check-bundle schema
 `7`; bundle от прежней версии нужно обновить через `check-clone`.
 
 Эта гарантия проверена для managed failure и внезапного завершения процесса при
@@ -810,6 +810,20 @@ Dry-run:
 допустимый dirty-state, перепроверяет полный live pre-state и complete report,
 а также создаёт и проверяет immutable staging. TIA write methods не вызываются.
 
+При непустом плане gate `before-write/workspace-path-budget` проверяет полные
+будущие пути исходников, sidecar, вложенной публикации, временных файлов,
+отчётов и workspace-backup. Проверка действует в dry-run и реальном apply,
+до project backup и первой TIA-записи. Путь файла должен быть короче 260,
+каталога — короче 248 единиц UTF-16; одной проверки длины `--out` недостаточно.
+При пустом плане gate проходит без проверки будущих путей записи.
+Отказ `WORKSPACE_PATH_TOO_LONG_OR_INVALID` объясняется в `apply-clone-gate.csv`.
+Для workspace без незавершённых транзакций сохранить локальные правки и evidence,
+выбрать более короткий путь, выполнить свежие `check-clone` и dry-run. Старый
+bundle не переносит разрешение на новый путь. При незавершённой транзакции сначала
+разобрать recovery по исходным путям, не перемещая и не удаляя его файлы.
+Это ограниченная защита .NET Framework/Win32, не неограниченная поддержка длинных
+путей; см. [описание ограничения](README.md#workspace-path-limits).
+
 Реальное применение:
 
 ```cmd
@@ -891,7 +905,15 @@ _apply-reports\apply-clone-preflight-plan.jsonl
 _apply-reports\apply-clone-preflight-issues.jsonl
 _apply-reports\apply-clone-gate.jsonl
 _apply-reports\apply-clone-operations.jsonl
+_apply-reports\failed-<GUID>\failure.txt
+_apply-reports\failed-<GUID>\files.csv
 ```
+
+При отказе after-write проверки до cleanup в `failed-<GUID>` также копируются
+имеющиеся sync/check CSV и summary. `files.csv` содержит SHA-256 сохранённых файлов.
+Это только диагностика: без SCL и authorization bundle, не подтверждение принятия
+или Save. Имена блоков и локальные пути остаются конфиденциальными. Неудача записи
+диагностики отмечается warning и не заменяет исходный блокирующий отказ.
 
 ## 7. PLC export and diagnostics
 

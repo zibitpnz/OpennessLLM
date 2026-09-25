@@ -8,7 +8,7 @@ and `CHANGELOG.md`.
 `OpennessLLM` is a C#/.NET Framework command-line tool for LLM-assisted TIA
 Portal Openness engineering work.
 
-Version: `0.12.13` (2026-09-07). Current compatibility contracts are listed in
+Version: `0.12.14` (2026-09-07). Current compatibility contracts are listed in
 [README](README.md#current-version-and-compatibility).
 
 Created by: `Zibitpnz`.
@@ -75,13 +75,22 @@ sidecar with `softwarePath` and `sourceOrigin=explicit-new-local-source`.
 
 Current publication recovery preserves late editor changes in the backup's
 permanent `_rollback` directory. Journal schema `5`, bundle schema `7`, write
-policy `clone-write-policy-v12` and completion result schema `2` apply. The
+policy `clone-write-policy-v13` and completion result schema `2` apply. The
 journal plus installed-state verification determine commit/rollback, never the
 completion report alone. `diagnosticDetails` retains full prior errors across
 fresh recovery even when the current status becomes `committed/recovered`.
 Foreign or malformed completion is not silently overwritten; committed recovery
 retains its journal/package until the diagnostic conflict is resolved. See
 [publication and recovery](README.md#clone-publication-and-recovery).
+
+For nonempty plans, `before-write/workspace-path-budget` checks projected
+workspace paths in dry-run and real apply before project backup/TIA mutation.
+Full file paths must be <260 UTF-16 code units and directory paths <248,
+including nested publication paths. This is not unlimited long-path support.
+After an upgrade or a safe workspace relocation, obtain a fresh `check-clone`
+and dry-run; never rewrite bundle policy/path fields. Resolve outstanding
+transactions at their original paths before relocation. See
+[workspace path limits](README.md#workspace-path-limits).
 
 When a block is added manually in TIA Portal and then accepted with
 `check-clone`/`sync-clone`, versions since `0.12.2` keep `SoftwarePath` populated in
