@@ -118,6 +118,11 @@ CLONE_PROJECT\_hmi_metadata\...
 Если `init-workspace` blocked, смотреть `workspace-init-summary.txt` и
 `workspace-init-steps.csv`.
 
+Для HMI-only проекта отсутствие `plc-blocks.csv` и
+`clone-check-bundle.json` нормально: успешный init/status закрывает refresh без
+PLC-авторизации. Результат `ExistingWorkspace` без `--force` также не требует
+нового PLC bundle и оставляет прежнюю PLC-авторизацию отозванной.
+
 ## 4. Ежедневная проверка состояния
 
 Цель: понять, можно ли безопасно продолжать работу.
@@ -143,6 +148,12 @@ CLONE_PROJECT\hmi-check-summary.txt
 .\OpennessLLM\run.cmd sync-clone --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd hmi-sync-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
+
+Статусы `object-replaced-or-mismatched` и
+`ambiguous-rename-and-renumber`, а также `ambiguous-object-correlation` нельзя
+принимать через автоматический apply:
+сначала нужно вручную разобраться, какой именно engineering object должен
+соответствовать baseline, затем снова выполнить `check-clone`.
 
 Не делать `sync-clone` автоматически. Это означает "я принимаю текущий проект
 как новый baseline".
@@ -206,49 +217,49 @@ CLONE_PROJECT\hmi-check-summary.txt
 CLONE_PROJECT\_root\...
 ```
 
-Шаг 4. Dry-run:
-
-```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-```
-
-Шаг 5. Если preflight clean, применить:
-
-```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
-```
-
-Шаг 6. Скомпилировать:
-
-```cmd
-.\OpennessLLM\run.cmd compile-block --attach --attach-index 0 --name <block-name> --apply
-```
-
-или шире:
-
-```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
-```
-
-Шаг 7. Проверить clone:
+Шаг 4. После изменения заново выпустить bundle:
 
 ```cmd
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Шаг 8. Если TIA состояние принято как новое правильное состояние:
+Шаг 5. Dry-run:
+
+```cmd
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+```
+
+Шаг 6. Если preflight clean, применить, скомпилировать и сохранить:
+
+```cmd
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
+```
+
+`apply-clone --apply --save` сам запускает самый широкий доступный compile после
+точной post-write проверки и до `SaveProject`. При compiler errors сохранение и
+публикация baseline запрещены. Отдельные `compile-block`/`compile-all` после
+успешного apply не обязательны; они остаются диагностическими командами.
+
+Перед apply проект должен быть сохранён: `Project.IsModified=false`. Если это
+условие невозможно доказать, команда fail closed. Флаг
+`--i-accept-saving-preexisting-project-changes` разрешён только как осознанное
+опасное исключение: он подтверждает сохранение всех уже имевшихся изменений TIA
+и фиксируется в audit-отчёте.
+
+Шаг 7. При необходимости отдельно перепроверить clone:
+
+```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+```
+
+Шаг 8. Если отдельно проверенное TIA состояние нужно принять как новое правильное состояние:
 
 ```cmd
 .\OpennessLLM\run.cmd sync-clone --out .\CLONE_PROJECT
 ```
 
-Шаг 9. При необходимости сохранить TIA проект:
-
-```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply --save
-```
-
-или повторить apply с `--save`, если save нужен именно после apply.
+После успешного `apply-clone --apply --save` проект уже скомпилирован, сохранён,
+а новый clone baseline опубликован из свежего post-save snapshot.
 
 ## 7. Создание нового PLC блока
 
@@ -275,10 +286,10 @@ CLONE_PROJECT\_root\120_MyNewBlock.scl
 CLONE_PROJECT\_root\MyNewBlock.scl
 ```
 
-Шаг 3. При необходимости добавить sidecar:
+Шаг 3. Обязательно добавить sidecar:
 
 ```text
-CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
+CLONE_PROJECT\_root\120_MyNewBlock.scl.meta.json
 ```
 
 Пример:
@@ -289,21 +300,37 @@ CLONE_PROJECT\_root\MyNewBlock.scl.meta.json
   "numberMode": "Manual",
   "number": 120,
   "programmingLanguage": "SCL",
-  "name": "MyNewBlock"
+  "name": "MyNewBlock",
+  "softwarePath": "PLC",
+  "sourceOrigin": "explicit-new-local-source"
 }
 ```
 
-Шаг 4. Dry-run и apply:
+Для нового loose source задавайте точное
+`sourceOrigin=explicit-new-local-source`. Без него происхождение считается
+`unknown-orphaned` и при неоднозначности source-blocker gate завершится fail
+closed. Непустой `softwarePath` обязателен; числовой префикс имени файла без
+этого sidecar не разрешает создание блока.
+
+`explicit-new-local-source` используется один раз. Обычный `check-clone` не
+промоутит source только из-за совпадения имени/номера. После успешного
+`CreateBlock` инструмент создаёт receipt, повторно экспортирует live source и
+требует совпадения language и canonical hash. Только затем восстанавливаемая
+транзакция меняет sidecar origin на `tracked-baseline` и публикует строку в
+`plc-blocks.csv`. Не возвращайте marker обратно вручную: после применения блок
+уже является tracked baseline.
+
+Шаг 4. После создания source и sidecar заново выполнить check, затем dry-run и apply:
 
 ```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-Шаг 5. Compile и check:
+Шаг 5. При необходимости дополнительный check:
 
 ```cmd
-.\OpennessLLM\run.cmd compile-block --attach --attach-index 0 --name MyNewBlock --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
@@ -320,8 +347,21 @@ workflow.
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
-Переименовать source file в `CLONE_PROJECT\_root\...` и, если нужно, обновить
-имя внутри source text.
+Переименовать source file в `CLONE_PROJECT\_root\...`, обновить имя внутри
+source text и перенести соседний `.meta.json` вместе с source, если sidecar
+существует. Числовой префикс файла сохраняют: например,
+`10_OldName.scl` -> `10_NewName.scl`. `check-clone` принимает такой rename
+только при единственном совпадении PLC/group/type/number; неоднозначность
+остаётся fail closed.
+Если изменилось только имя верхнеуровневой декларации, план классифицируется как
+`RenameBlock`; любые отличия attributes/interface/body/comments требуют
+`RenameAndUpdateSource`.
+
+После rename заново выпустить bundle:
+
+```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
+```
 
 Dry-run:
 
@@ -332,13 +372,12 @@ Dry-run:
 Apply:
 
 ```cmd
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 ```
 
-Потом:
+При необходимости потом:
 
 ```cmd
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 
@@ -358,9 +397,9 @@ Apply:
 Удалить файл из `CLONE_PROJECT\_root\...`.
 
 ```cmd
+.\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 .\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT
-.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply
-.\OpennessLLM\run.cmd compile-all --attach --attach-index 0 --apply
+.\OpennessLLM\run.cmd apply-clone --attach --attach-index 0 --out .\CLONE_PROJECT --apply --save
 .\OpennessLLM\run.cmd check-clone --attach --attach-index 0 --out .\CLONE_PROJECT
 ```
 

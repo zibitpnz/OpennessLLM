@@ -25,4 +25,8 @@ New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     /out:$outExe `
     (Join-Path $scriptDir "Program.cs")
 
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 Write-Host "Built: $outExe"
