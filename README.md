@@ -78,9 +78,10 @@ site's commissioning and functional-safety procedures.
 ## Project Status
 
 The tool is under active development. Interfaces and generated metadata may
-change between versions. Version `0.12.14` is an unreleased candidate; the source
-version is not an announcement of a published release. Use the offline self-test
-before working with a new build:
+change between versions. Check [GitHub Releases](https://github.com/zibitpnz/OpennessLLM/releases)
+for published versions and downloadable archives; a source version label alone
+does not announce a published release. Use the offline self-test before working
+with a new build:
 
 ```powershell
 .\OpennessLLM\run.cmd self-test --out .\OpennessLLM\out\self-test-current

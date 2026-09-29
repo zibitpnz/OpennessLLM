@@ -2,9 +2,14 @@
 
 All notable changes to OpennessLLM are recorded in this file.
 
-## Unreleased
+## 0.12.14
 
-### 0.12.14
+This version collects the changes since the public 0.12.3 release. Versions
+0.12.4 through 0.12.13 below identify development milestones, not separate
+published releases. See [GitHub Releases](https://github.com/zibitpnz/OpennessLLM/releases)
+for published tags and archives.
+
+### Latest fixes
 
 - Keep full unique IDs in compact apply-validation and nested sync directory
   names to avoid redundant path growth. A blocking `workspace-path-budget`
